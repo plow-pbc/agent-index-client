@@ -171,11 +171,22 @@ def from_hermes(days, home=None):
     # window the agent reported ZERO while being busy. Measured on a real
     # store: a session spanning 2.5 days with 290k tokens, all on day one.
     #
-    # ponytail: last_seen still lumps a multi-day session onto its final active
-    # day rather than spreading it. That is wrong in distribution but never
-    # wrong in presence, which is the failure that matters — an active agent is
-    # always inside the window. Spreading properly needs per-day deltas held in
-    # local state, which is a bigger change and a new class of desync.
+    # ponytail: last_seen lumps a multi-day session's ENTIRE lifetime total onto
+    # its final active day. This OVER-REPORTS, and in two ways worth naming
+    # plainly, because the index is something people compare agents on:
+    #   - one long-lived chat shows its whole history as a single day's spike;
+    #   - a session opened before the window but used inside it drags its
+    #     pre-window tokens into the window total, so the total is wrong in
+    #     magnitude, not only in distribution.
+    # It never double-counts (last_seen is one value per row, so each row lands
+    # once) and never under-reports presence.
+    # Measured on this store: 3 of 163 rows span >1 day but carry 4.11M of
+    # 30.34M tokens — 13.6% landing on the wrong day, worst single bar 2.09M.
+    # Upgrade path is per-day deltas in local state, and it can only work going
+    # forward: there is NO per-day billed source to rebuild history from. Do not
+    # re-investigate `messages` — its token_count is unpopulated (NULL on all
+    # 2414 rows) and it carries no model column, so it cannot feed a chart that
+    # stacks by model.
     q = """SELECT date(last_seen,'unixepoch','localtime') AS d,
                   COALESCE(model,'unknown') AS m,
                   SUM(COALESCE(input_tokens,0)), SUM(COALESCE(output_tokens,0)),
