@@ -80,14 +80,15 @@ def _post(url, body, headers):
         return 0, {"error": f"could not reach {url}: {e.reason}"}
 
 
-def _write_token(value):
+def _write_token(value, path=None):
     """0600, and the directory too: a world-readable parent makes the mode moot."""
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+    path = path or TOKEN_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
-        os.chmod(os.path.dirname(TOKEN_PATH), 0o700)
+        os.chmod(os.path.dirname(path), 0o700)
     except OSError:
         pass
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(value)
 
@@ -135,10 +136,31 @@ def login():
     sys.exit("  code expired, run --login again")
 
 
-def token():
-    if os.path.exists(TOKEN_PATH):
-        return open(TOKEN_PATH).read().strip()
-    sys.exit("no token — run with --login first")
+def token(path=None):
+    path = path or TOKEN_PATH
+    if not os.path.exists(path):
+        sys.exit("no token — run with --login first")
+    t = open(path).read().strip()
+    if not t.startswith(("gho_", "ghu_", "ghp_")):
+        return t
+    # An instance authorised before scoped keys existed still holds the GitHub
+    # bearer on disk, where the agent's own runtime can read it. Upgrade on any
+    # run rather than only on --login: a supervisor never calls --login, so the
+    # old credential would sit there until a human remembered a documented
+    # step, and documented one-time steps get skipped. The bearer is still
+    # valid, so the exchange needs nobody present.
+    try:
+        code, k = _post(f"{API}/v1/keys", {"label": os.uname().nodename[:80]},
+                        {"Authorization": "Bearer " + t})
+        if code == 200 and k.get("key"):
+            _write_token(k["key"], path)
+            print("  upgraded the stored GitHub token to an Index-scoped key")
+            return k["key"]
+    except Exception:
+        pass
+    # Offline, or the server is down. Keep reporting with what we have rather
+    # than failing the run; the next run tries again.
+    return t
 
 
 def from_agentsview(days):
@@ -561,6 +583,41 @@ def self_check():
         open(st, "w").write("{not json")
         assert from_hermes(28, home=tmp, state_path=st) == {}, \
             "a corrupt state file rebaselines rather than crashing"
+
+    # A legacy GitHub bearer must upgrade itself on an ORDINARY run, because a
+    # supervisor never calls --login and a documented one-time step gets
+    # skipped. And a failed upgrade must never cost the report.
+    global _post
+    real_post = _post
+    with tempfile.TemporaryDirectory() as tdir:
+        tp = os.path.join(tdir, "token")
+        open(tp, "w").write("gho_legacybearer")
+        _post = lambda url, body, headers: (200, {"key": "aik_upgraded", "login": "x"})
+        try:
+            assert token(tp) == "aik_upgraded", "a legacy bearer must be exchanged"
+            on_disk = open(tp).read().strip()
+            assert on_disk == "aik_upgraded", f"and rewritten on disk: {on_disk}"
+            assert not on_disk.startswith("gho_"), "a GitHub token must never be left behind"
+
+            # Exchange fails: keep working, do not destroy the credential.
+            open(tp, "w").write("gho_legacybearer")
+            # Non-200 WITH a key-shaped body: an error page or a proxy reply
+            # must never be adopted as a credential, so the status is what
+            # decides, not the presence of the field.
+            _post = lambda url, body, headers: (500, {"key": "aik_from_an_error_body"})
+            assert token(tp) == "gho_legacybearer", \
+                "a failed upgrade must not break reporting"
+            assert open(tp).read().strip() == "gho_legacybearer", \
+                "a failed upgrade must not blank the only credential we have"
+
+            # An already-scoped key is left completely alone: no network call.
+            open(tp, "w").write("aik_already")
+            def _boom(*a, **k):
+                raise AssertionError("must not call the server for an existing key")
+            _post = _boom
+            assert token(tp) == "aik_already"
+        finally:
+            _post = real_post
 
     # An unreachable server is a reported failure, not a traceback in a
     # supervised loop's logs. Port 9 is discard: nothing listens there.
