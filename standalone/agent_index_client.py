@@ -33,7 +33,24 @@ try:
 except AttributeError:          # Python < 3.7
     pass
 
-API = os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app")
+def _api(url):
+    """Refuse to send the Plow token over cleartext http.
+
+    The bearer identifies its owner to Plow, so anyone on the path gets it and
+    can report as that person until it is rotated. Localhost is the exception,
+    and only localhost: that traffic never leaves the machine, and developing
+    against a local server is the reason this variable exists.
+    """
+    if url.startswith("https://"):
+        return url
+    host = url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    if url.startswith("http://") and host in ("localhost", "127.0.0.1", "::1", "[::1]"):
+        return url
+    sys.exit(f"AGENT_INDEX_API must be https (got {url!r}) — the Plow token would "
+             f"travel in cleartext, and anyone on the path could then report as you")
+
+
+API = _api(os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app"))
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
@@ -193,12 +210,22 @@ STATE_PATH = os.path.expanduser("~/.agent-index/hermes-state.json")
 def _load_state(path=None):
     """Previous counters and the per-day ledger. A corrupt file is not fatal:
     losing it costs one run's delta, while refusing to report costs every run."""
+    path = path or STATE_PATH
     try:
-        with open(path or STATE_PATH) as f:
+        with open(path) as f:
             st = json.load(f)
-        return st if isinstance(st, dict) else {}
+        if isinstance(st, dict):
+            return st
+    except FileNotFoundError:
+        return {}                       # never written: a genuine first run
     except (OSError, ValueError):
-        return {}
+        pass
+    # It exists and we cannot read it. That is a LOST ledger on an install that
+    # has been reporting, not a fresh one, and the difference decides whether
+    # the next run backfills. Say which it is rather than returning the same
+    # empty dict for both.
+    print(f"  state file at {path} is unreadable — rebaselining, reporting nothing this run")
+    return {"unreadable": True}
 
 
 def _save_state(path, state):
@@ -290,7 +317,18 @@ def from_hermes(days, home=None, state_path=None):
     # re-baselined and reported nothing. A fresh install has no data by
     # definition, which made this the normal path, not an edge case.
     snap = state.get("snapshot")
-    fresh_install = snap is None
+    # MISSING snapshot means one of two very different things. A state file that
+    # was never written is a first run, and its dated history can be placed. A
+    # state file that exists but will not parse is a LOST ledger on an install
+    # that has already been reporting -- backfilling there would republish
+    # today's same-day sessions as a whole new day's total, over reports that
+    # were already correct. So: baseline it, report nothing, resume next run.
+    # A lost ledger is not a first run and not a normal run either: with no
+    # snapshot, every counter would diff against zero and the whole lifetime of
+    # every session would land on today, over reports that were already correct.
+    # It re-snapshots and credits nothing.
+    lost = bool(state.get("unreadable"))
+    fresh_install = snap is None and not lost
     snap, ledger = snap or {}, state.get("daily") or {}
     cur, today = {}, datetime.date.today().isoformat()
     # The row's identity is its primary key, but older stores predate some of
@@ -344,6 +382,8 @@ def from_hermes(days, home=None, state_path=None):
             m = "unknown"
         i, o, cr, cw = row[n:n + 4]
         cur[key] = [i, o, cr, cw]
+        if lost:
+            continue
         placed = day_of(row[n + 4], row[n + 5]) if fresh else None
         if fresh and placed is None:
             # It spanned days, or is undated: any day we picked would be
@@ -505,9 +545,12 @@ def main(argv):
             print(f"unknown option: {unknown[0]}\n", file=sys.stderr)
         print(__doc__.strip(), file=sys.stderr)
         return 2 if unknown else 0
-    purge_legacy_github_token()
+    # --self-check first: it is an offline assertion run that needs no
+    # credential, and `just test` inherits the developer's real HOME -- purging
+    # first deleted the token off the machine of whoever ran the tests.
     if "--self-check" in argv:
         return self_check()
+    purge_legacy_github_token()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
         sys.exit(__doc__)
@@ -679,26 +722,37 @@ def self_check():
             assert got[ran.isoformat()]["gpt-5.5"] == {"input": 7, "output": 3,
                                                        "cache_read": 0, "cache_write": 0}, got
 
-        # A corrupt state file costs the ledger, never the whole report: it
-        # rebaselines rather than crashing, and re-places what it can still
-        # place truthfully (the same-day sessions above).
+        # A corrupt state file costs the ledger, never the whole report, and it
+        # must not be mistaken for a first run: this install has been reporting,
+        # so anything "recovered" here would land on top of days that were
+        # already right. It re-snapshots, reports nothing, resumes next run.
         open(st, "w").write("{not json")
+        assert from_hermes(28, home=tmp, state_path=st) == {}, \
+            "a lost ledger rebaselines rather than replaying history onto today"
+        c = sqlite3.connect(db)
+        c.execute("UPDATE session_model_usage SET input_tokens = 2 WHERE session_id='s1'")
+        c.commit(); c.close()
         got = from_hermes(28, home=tmp, state_path=st)
-        assert got == {today: {"claude-opus-5": {"input": 9, "output": 0,
-                                                 "cache_read": 0, "cache_write": 0}}}, got
+        assert got[today]["gpt-5.5"]["input"] == 1, \
+            f"and the run after it reports the delta, not the lifetime: {got}"
 
     # --video takes a YouTube id because the page embeds
     # youtube-nocookie.com/embed/<id>; a URL there renders a broken player on a
     # public page. Reject it before anything is sent, so a typo costs a message
     # rather than a live page with a broken player on it.
-    for bad in ("https://youtu.be/abc", "youtube.com/watch?v=abc"):
-        r = subprocess.run([sys.executable, os.path.abspath(__file__),
-                            "--register", "--agent", "x", "--video", bad],
-                           capture_output=True, text=True)
-        assert r.returncode != 0 and "VIDEO ID" in r.stdout + r.stderr, \
-            f"a video URL must be refused before signing in: {bad} -> {r.stdout+r.stderr}"
-        assert "registration failed" not in r.stdout, \
-            "the arguments must be checked before anything is sent"
+    # Every child here re-enters main(), which purges a legacy token on startup.
+    # Run them against a throwaway HOME: `just test` inherits a developer's real
+    # one, and a test run must not delete a credential on their machine.
+    with tempfile.TemporaryDirectory() as sandbox:
+        child_env = dict(os.environ, HOME=sandbox)
+        for bad in ("https://youtu.be/abc", "youtube.com/watch?v=abc"):
+            r = subprocess.run([sys.executable, os.path.abspath(__file__),
+                                "--register", "--agent", "x", "--video", bad],
+                               capture_output=True, text=True, env=child_env)
+            assert r.returncode != 0 and "VIDEO ID" in r.stdout + r.stderr, \
+                f"a video URL must be refused before it is sent: {bad} -> {r.stdout+r.stderr}"
+            assert "registration failed" not in r.stdout, \
+                "the arguments must be checked before anything is sent"
 
     # A Plow container carries its own token and needs no sign-in at all, and
     # it must be PREFERRED over any stored key: the key is a leftover from the
