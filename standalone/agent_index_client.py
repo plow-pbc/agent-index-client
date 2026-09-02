@@ -72,6 +72,12 @@ def _post(url, body, headers):
         # A refused redirect surfaces here as the 30x itself, which is what we
         # want: reported, never followed with the token attached.
         return e.code, json.loads(e.read() or b"{}")
+    except urllib.error.URLError as e:
+        # Unreachable server, DNS failure, no network yet at container boot.
+        # This ran as an unhandled traceback in a supervised loop's logs; a
+        # status of 0 reports the same failure without the noise, and callers
+        # already treat anything other than 200 as a failure.
+        return 0, {"error": f"could not reach {url}: {e.reason}"}
 
 
 def _write_token(value):
@@ -430,7 +436,26 @@ def main(argv):
     if "--dry-run" in argv:
         return print(json.dumps(payload, indent=1)[:2000])
     if not payload["days"]:
-        return print("  nothing to report")
+        # Announce that we are measuring but have nothing yet, so the page can
+        # say "measurement pending" instead of implying the agent is idle. The
+        # server latches once real usage lands, so sending this on a genuinely
+        # quiet day cannot reopen the state.
+        #
+        # Best-effort and SILENT by deliberate design. This runs at container
+        # boot, when the network is least likely to be up, and the announcement
+        # is not the measurement: letting it fail a run would mean a new agent's
+        # first act dies on a network hiccup, having measured and lost nothing.
+        # token() exits the process when there is no credential, and SystemExit
+        # is a BaseException that `except Exception` would not catch — so check
+        # for the file first rather than letting the announcement turn a quiet
+        # run on an unconfigured machine into a failure.
+        if os.path.exists(TOKEN_PATH):
+            try:
+                _post(f"{API}/v1/usage?agent_id={agent}", {"days": [], "status": "pending"},
+                      {"authorization": f"Bearer {token()}"})
+            except Exception:
+                pass
+        return print("  nothing to report yet — measuring from the next run")
     code, body = _post(f"{API}/v1/usage?agent_id={agent}", payload,
                        {"authorization": f"Bearer {token()}"})
     print(f"  {code} {body}")
@@ -507,6 +532,25 @@ def self_check():
         open(st, "w").write("{not json")
         assert from_hermes(28, home=tmp, state_path=st) == {}, \
             "a corrupt state file rebaselines rather than crashing"
+
+    # An unreachable server is a reported failure, not a traceback in a
+    # supervised loop's logs. Port 9 is discard: nothing listens there.
+    code, body = _post("http://127.0.0.1:9/v1/usage", {"days": []}, {})
+    assert code == 0 and "could not reach" in body.get("error", ""), (code, body)
+
+    # A quiet run must never fail because we could not ANNOUNCE that it was
+    # quiet. The announcement is not the measurement.
+    import subprocess
+    with tempfile.TemporaryDirectory() as empty_home:
+        quiet = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
+            capture_output=True, text=True,
+            env={**os.environ, "HERMES_HOME": "/nonexistent", "HOME": empty_home,
+                 "AGENT_INDEX_API": "http://127.0.0.1:9"})
+    assert "Traceback" not in quiet.stderr, \
+        f"a quiet run must not crash, with or without a reachable server: {quiet.stderr[-300:]}"
+    assert quiet.returncode == 0, \
+        f"a quiet run reports nothing and succeeds; it must not fail: {quiet.stdout[-200:]}"
 
     assert _unknown_flags(["--oops"]) == ["--oops"], "a typo must be caught"
     assert _unknown_flags(["--body", "-1 week of work"]) == [], \
