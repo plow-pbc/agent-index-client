@@ -120,6 +120,28 @@ test("the loopback exception bypasses the proxy it would otherwise leak through"
   });
   assert.doesNotMatch(out.out, /must be https/, "loopback is still allowed");
 
+  // The exact string from the review: a hand-rolled split reads the host as
+  // "localhost" while urllib -- the thing that opens the socket -- reads it as
+  // attacker.example with "localhost:80" as a username. The check said the
+  // token never left the machine; it would have gone to a stranger in the clear.
+  const smuggled = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+    { AGENT_INDEX_API: "http://localhost:80@attacker.example" });
+  assert.notEqual(smuggled.code, 0, "userinfo must not get past the loopback check");
+  assert.match(smuggled.out, /must not carry credentials/);
+  assert.doesNotMatch(smuggled.out, /agentsview/, "and it must fail before any work is done");
+
+  // Credentials in a URL have no use here at all, https included.
+  const overTls = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+    { AGENT_INDEX_API: "https://user:pass@index.example" });
+  assert.notEqual(overTls.code, 0);
+
+  // The real loopback forms still work, including IPv6.
+  for (const ok of ["http://127.0.0.1:3000", "http://localhost:8080", "http://[::1]:8000"]) {
+    const r = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+      { AGENT_INDEX_API: ok });
+    assert.doesNotMatch(r.out, /must be https|must not carry credentials/, `${ok} is loopback`);
+  }
+
   const src = fs.readFileSync(CLIENT, "utf8");
   const opener = src.slice(src.indexOf("def _open_no_redirect"), src.indexOf("def _post("));
   assert.match(opener, /ProxyHandler\(\{\}\)/, "loopback requests must disable the environment proxy");

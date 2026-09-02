@@ -20,7 +20,7 @@ no file paths, no costs. Identity is the container's own Plow token, which the
 index resolves by asking Plow -- there is no sign-in and no second account.
 """
 import datetime
-import json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.request
+import json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 # Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
@@ -44,10 +44,19 @@ def _api(url):
     and only localhost: that traffic never leaves the machine, and developing
     against a local server is the reason this variable exists.
     """
-    if url.startswith("https://"):
+    parts = urllib.parse.urlsplit(url)
+    # Userinfo is refused outright, before anything looks at the host. Splitting
+    # the string by hand read "http://localhost:80@attacker.example" as
+    # localhost, while urllib -- the thing that actually opens the socket --
+    # reads the host as attacker.example and the rest as a username. That is a
+    # cleartext bearer to a stranger, past a check that said it never left the
+    # machine. Nothing here has any use for credentials in a URL.
+    if parts.username or parts.password or "@" in parts.netloc:
+        sys.exit(f"AGENT_INDEX_API must not carry credentials (got {url!r}) — "
+                 f"the host urllib connects to is not the one this looks like")
+    if parts.scheme == "https":
         return url
-    host = url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
-    if url.startswith("http://") and host in ("localhost", "127.0.0.1", "::1", "[::1]"):
+    if parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1", "::1"):
         # Only true with the proxy bypassed. urllib reads HTTP_PROXY from the
         # environment, so on a machine with a proxy set and loopback missing
         # from NO_PROXY -- a normal corporate box -- "it never leaves the
@@ -657,19 +666,33 @@ def self_check():
     # behaviour the last_seen version got wrong: a long-lived session that is
     # merely ACTIVE today must not republish its lifetime as today's usage.
     import tempfile
+    def make_store(dirpath, rows=(), keyed=False):
+        """A Hermes store to diff against.
+
+        `keyed` adds the columns that make up a row's identity. Older stores do
+        not have them and the collector takes whichever exist, so both shapes
+        have to be exercised -- that is the only reason there is a flag here.
+        """
+        cols = ("session_id TEXT, model TEXT, billing_provider TEXT,"
+                " billing_base_url TEXT, billing_mode TEXT, task TEXT," if keyed
+                else "session_id TEXT, model TEXT,")
+        c = sqlite3.connect(os.path.join(dirpath, "state.db"))
+        c.execute(f"CREATE TABLE session_model_usage ({cols}"
+                  " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
+                  " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
+        for row in rows:
+            c.execute(f"INSERT INTO session_model_usage VALUES ({','.join('?' * len(row))})", row)
+        c.commit()
+        return c
+
     with tempfile.TemporaryDirectory() as tmp:
         db = os.path.join(tmp, "state.db")
         st = os.path.join(tmp, "state.json")
-        c = sqlite3.connect(db)
-        c.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
-                  " billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT,"
-                  " task TEXT, input_tokens INT, output_tokens INT, cache_read_tokens INT,"
-                  " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
         now = time.time()
-        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                  ("s1", "gpt-5.5", "", "", "", "", 1000, 2000, 3000, 4000,
-                   now - 40 * 86400, now - 3600))
-        c.commit()
+        c = make_store(tmp, keyed=True, rows=[
+            ("s1", "gpt-5.5", "", "", "", "", 1000, 2000, 3000, 4000,
+             now - 40 * 86400, now - 3600),
+        ])
 
         assert from_hermes(28, home=tmp, state_path=st) == {}, \
             "the first run records a baseline and reports nothing"
@@ -713,11 +736,7 @@ def self_check():
         # agent's first session, which is the most visible session it has.
         with tempfile.TemporaryDirectory() as fresh_home:
             st2 = os.path.join(fresh_home, "state.json")
-            c2 = sqlite3.connect(os.path.join(fresh_home, "state.db"))
-            c2.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
-                       " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
-                       " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
-            c2.commit()
+            c2 = make_store(fresh_home)
             assert from_hermes(28, home=fresh_home, state_path=st2) == {}, \
                 "an empty store reports nothing"
             c2.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
@@ -736,18 +755,13 @@ def self_check():
         # for all of them, so it cannot be split and is not invented onto one.
         with tempfile.TemporaryDirectory() as used:
             st3 = os.path.join(used, "state.json")
-            c3 = sqlite3.connect(os.path.join(used, "state.db"))
-            c3.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
-                       " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
-                       " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
             # Midday, so an hour either side cannot cross midnight and flake.
             ran = datetime.date.today() - datetime.timedelta(days=3)
             noon = datetime.datetime.combine(ran, datetime.time(12, 0)).timestamp()
-            c3.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
-                       ("done", "gpt-5.5", 7, 3, 0, 0, noon, noon + 3600))
-            c3.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
-                       ("spanning", "gpt-5.5", 500, 0, 0, 0, noon - 9 * 86400, noon))
-            c3.commit()
+            c3 = make_store(used, rows=[
+                ("done", "gpt-5.5", 7, 3, 0, 0, noon, noon + 3600),
+                ("spanning", "gpt-5.5", 500, 0, 0, 0, noon - 9 * 86400, noon),
+            ])
             got = from_hermes(28, home=used, state_path=st3)
             c3.close()
             assert list(got) == [ran.isoformat()], \
@@ -760,13 +774,7 @@ def self_check():
         # would otherwise lose it and re-baseline. An install that predates the
         # move carries its ledger across rather than starting over.
         with tempfile.TemporaryDirectory() as moved:
-            c4 = sqlite3.connect(os.path.join(moved, "state.db"))
-            c4.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
-                       " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
-                       " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
-            c4.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
-                       ("s", "gpt-5.5", 100, 0, 0, 0, time.time(), time.time()))
-            c4.commit()
+            c4 = make_store(moved, rows=[("s", "gpt-5.5", 100, 0, 0, 0, time.time(), time.time())])
             beside = os.path.join(moved, ".agent-index-state.json")
             from_hermes(28, home=moved)
             assert os.path.exists(beside), "the ledger belongs beside the store it snapshots"
