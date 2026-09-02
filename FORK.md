@@ -20,15 +20,17 @@ The Node reporter needs node, npm and AgentsView. Agents live in containers and
 on $5 VPSes, so the standalone clients are Python stdlib only — no node, no
 AgentsView, no build step — and read each runtime's own store directly.
 
-- `hermes_client.py` — reports Hermes usage in the tokenmaxxing wire format.
-  Proven end to end: Hermes in a container, its own Codex device-code
-  credential, `200 {"ok":true,"rows":1}`, `source=hermes` live on the feed.
-- `agent_index_hermes.py` — the same collector emitting the **agent** schema:
-  one row per run, carrying `api_calls`, `tool_calls`, `end_reason`, `task` and
-  `parent_run_id`. This is the shape the server fork has to accept.
-- `Dockerfile` — Hermes plus its client in one image.
+- `agent_index_client.py` — the client. Reads the runtime's own store, reports
+  to the Agent Index as the container's `PLOW_AGENT_TOKEN`. Carries
+  `--self-check` (assert-based, no framework) and `--dry-run`.
+- `Dockerfile` — Hermes plus that client in one image.
 
-Both carry `--self-check` (assert-based, no framework) and `--dry-run`.
+Two earlier collectors lived here — `hermes_client.py`, which emitted the
+tokenmaxxing wire format, and `agent_index_hermes.py`, which emitted a per-run
+agent schema. Both are gone: the first authenticated against tokenmaxxing with
+`TKMX_API_KEY` and could not talk to this index at all, and the image was still
+building from it. Git history has them if the shape is ever wanted again; a
+copy sitting in the tree only waits to be shipped by mistake.
 
 **Hermes cannot go through AgentsView.** AgentsView indexes Hermes sessions but
 reports zero tokens for every one, so a Hermes machine reads as idle. These
