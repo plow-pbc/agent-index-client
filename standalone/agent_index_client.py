@@ -23,6 +23,16 @@ flow; the token is stored 0600 and only ever sent to github.com and the index.
 import json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.request
 from collections import defaultdict
 
+# Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
+# so Python block-buffers it — and the login instruction ("open this URL, enter
+# this code") sits in a buffer while the user waits at a blank log wondering
+# whether anything is happening. Everything this prints is meant to be read as
+# it happens.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:          # Python < 3.7
+    pass
+
 CLIENT_ID = "Ov23lirUZHTGqWCMVUXV"          # public by design; device flow uses no secret
 API = os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app")
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
