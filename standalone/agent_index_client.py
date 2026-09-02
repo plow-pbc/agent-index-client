@@ -102,20 +102,44 @@ def auth_headers():
 GITHUB_PREFIXES = ("gho_", "ghu_", "ghp_")
 
 
+def purge_legacy_github_token(path=None):
+    """Delete a stored GitHub bearer, wherever this run happens to be going.
+
+    Deleted, not ignored: leaving it on disk leaves a live GitHub credential in
+    a file whose whole point was to stop holding one. It has to happen on
+    STARTUP rather than inside token(), because the case that matters most --
+    a container that has PLOW_AGENT_TOKEN and a leftover gho_ from the old
+    sign-in -- never reaches token() at all, so hanging the cleanup off the
+    fallback path is a cleanup that runs precisely where it is not needed.
+
+    Returns whether a token was actually removed, so nothing claims a deletion
+    that a read-only mount or a permission refused.
+    """
+    path = path or TOKEN_PATH
+    try:
+        t = open(path).read().strip()
+    except OSError:
+        return False                    # absent, or not ours to read
+    if not t.startswith(GITHUB_PREFIXES):
+        return False
+    try:
+        os.remove(path)
+    except OSError as e:
+        print(f"  a leftover GitHub token at {path} could NOT be removed: {e}")
+        return False
+    print("  removed a leftover GitHub token; this client no longer uses one")
+    return True
+
+
 def token(path=None):
     path = path or TOKEN_PATH
     if os.path.exists(path):
         t = open(path).read().strip()
+        # A GitHub value cannot get past startup's purge, so reaching here with
+        # one means the delete failed. Refuse it either way: sending it as Plow
+        # auth would hand a GitHub token to a service that never wanted one.
         if t and not t.startswith(GITHUB_PREFIXES):
             return t
-        if t:
-            # Deleted, not ignored: leaving it on disk leaves a live GitHub
-            # credential in a file whose whole point was to stop holding one.
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            print("  removed a leftover GitHub token; this client no longer uses one")
     sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key")
 
 
@@ -434,6 +458,7 @@ def main(argv):
             print(f"unknown option: {unknown[0]}\n", file=sys.stderr)
         print(__doc__.strip(), file=sys.stderr)
         return 2 if unknown else 0
+    purge_legacy_github_token()
     if "--self-check" in argv:
         return self_check()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
