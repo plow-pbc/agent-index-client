@@ -151,6 +151,20 @@ def login():
     return k["key"]
 
 
+def auth_headers():
+    """Prefer the container's own Plow token when there is one.
+
+    Every Plow container already carries PLOW_AGENT_TOKEN, and the index can
+    resolve it to the person who owns the agent, so a container needs no GitHub
+    sign-in at all. The provider is DECLARED rather than sniffed from the token
+    shape: guessing wrong costs a round trip to the wrong service.
+    """
+    plow = os.environ.get("PLOW_AGENT_TOKEN")
+    if plow:
+        return {"authorization": "Bearer " + plow, "x-agent-index-auth": "plow"}
+    return auth_headers()
+
+
 def token(path=None):
     path = path or TOKEN_PATH
     if not os.path.exists(path):
@@ -451,7 +465,7 @@ def publish_story(agent, argv):
         "images": [{"url": u, "caption": ""} for i, a in enumerate(argv) if a == "--image" for u in [argv[i + 1]]],
     }
     code, out = _post(f"{API}/v1/stories?agent_id={agent}", body,
-                      {"authorization": f"Bearer {token()}"})
+                      auth_headers())
     print(f"  {code} {out}")
     sys.exit(0 if code == 200 else 1)
 
@@ -547,12 +561,12 @@ def main(argv):
         if os.path.exists(TOKEN_PATH):
             try:
                 _post(f"{API}/v1/usage?agent_id={agent}", {"days": [], "status": "pending"},
-                      {"authorization": f"Bearer {token()}"})
+                      auth_headers())
             except Exception:
                 pass
         return print("  nothing to report yet — measuring from the next run")
     code, body = _post(f"{API}/v1/usage?agent_id={agent}", payload,
-                       {"authorization": f"Bearer {token()}"})
+                       auth_headers())
     print(f"  {code} {body}")
     sys.exit(0 if code == 200 else 1)
 
@@ -661,6 +675,18 @@ def self_check():
             f"a video URL must be refused before signing in: {bad} -> {r.stdout+r.stderr}"
         assert "Open https://github.com" not in r.stdout, \
             "the device flow must not start before the arguments are checked"
+
+    # A Plow container carries its own token and needs no sign-in at all. It
+    # must be PREFERRED over any stored key and must declare its provider, or
+    # the server would try to resolve a Plow token as a GitHub one.
+    os.environ["PLOW_AGENT_TOKEN"] = "plow_tok_selfcheck"
+    try:
+        h = auth_headers()
+        assert h["authorization"] == "Bearer plow_tok_selfcheck", h
+        assert h.get("x-agent-index-auth") == "plow", \
+            "the provider must be declared, not left for the server to guess"
+    finally:
+        del os.environ["PLOW_AGENT_TOKEN"]
 
     # A legacy GitHub bearer must upgrade itself on an ORDINARY run, because a
     # supervisor never calls --login and a documented one-time step gets
