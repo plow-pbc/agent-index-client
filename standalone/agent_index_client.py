@@ -20,6 +20,7 @@ Sends day x model token counts and nothing else: no prompts, no task titles,
 no file paths, no costs. Identity is your GitHub account, proven once by device
 flow; the token is stored 0600 and only ever sent to github.com and the index.
 """
+import datetime
 import json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.request
 from collections import defaultdict
 
@@ -146,6 +147,32 @@ def from_agentsview(days):
     return out
 
 
+STATE_PATH = os.path.expanduser("~/.agent-index/hermes-state.json")
+
+
+def _load_state(path=None):
+    """Previous counters and the per-day ledger. A corrupt file is not fatal:
+    losing it costs one run's delta, while refusing to report costs every run."""
+    try:
+        with open(path or STATE_PATH) as f:
+            st = json.load(f)
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_state(path, state):
+    """Written atomically at 0600 — a half-written ledger would misreport, and a
+    partial rename would lose the baseline and re-dump history on the next run."""
+    path = path or STATE_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
 def _has_usage_table(db):
     """A store without session_model_usage is not the one we want."""
     try:
@@ -159,7 +186,7 @@ def _has_usage_table(db):
         return False
 
 
-def from_hermes(days, home=None):
+def from_hermes(days, home=None, state_path=None):
     """Hermes' own store, which agentsview indexes but reports as all zeros.
 
     Its four counters are disjoint (prompt = input + cache_read + cache_write)
@@ -183,49 +210,87 @@ def from_hermes(days, home=None):
         # container nobody is watching the path resolve.
         print(f"  no Hermes store at {db} (set HERMES_HOME if that is wrong)")
         return {}
-    # Read session_model_usage, not sessions, and key on last_seen.
+    # Snapshot-and-diff, because the counters are CUMULATIVE per session.
     #
-    # Two bugs in doing it the obvious way. sessions.model is ONE model per
-    # session, so a session that used two models reported both under one name;
-    # session_model_usage carries the real per-model split. And the counters
-    # are CUMULATIVE for the life of a session, while a Hermes gateway session
-    # is per chat and long-lived — so grouping on started_at attributed weeks
-    # of tokens to the day the chat opened, and once that day fell outside the
-    # window the agent reported ZERO while being busy. Measured on a real
-    # store: a session spanning 2.5 days with 290k tokens, all on day one.
+    # session_model_usage holds one row per (session, model, provider, base_url,
+    # mode, task) whose counters accumulate for the life of that session. Any
+    # attempt to date those totals by a column on the row is wrong:
+    #   - grouping on started_at put weeks of tokens on the day a chat opened,
+    #     and reported ZERO once that day left the window while the agent was busy;
+    #   - grouping on last_seen put a session's ENTIRE lifetime on its last active
+    #     day, so one long-lived chat published all its pre-window history as
+    #     today's usage. Measured: 13.6% of tokens landing on the wrong day.
+    # There is no per-day billed source to date them by instead — messages.token_count
+    # is NULL on every row and carries no model — so the only correct answer is to
+    # remember what we last saw and report the difference.
     #
-    # ponytail: last_seen lumps a multi-day session's ENTIRE lifetime total onto
-    # its final active day. This OVER-REPORTS, and in two ways worth naming
-    # plainly, because the index is something people compare agents on:
-    #   - one long-lived chat shows its whole history as a single day's spike;
-    #   - a session opened before the window but used inside it drags its
-    #     pre-window tokens into the window total, so the total is wrong in
-    #     magnitude, not only in distribution.
-    # It never double-counts (last_seen is one value per row, so each row lands
-    # once) and never under-reports presence.
-    # Measured on this store: 3 of 163 rows span >1 day but carry 4.11M of
-    # 30.34M tokens — 13.6% landing on the wrong day, worst single bar 2.09M.
-    # Upgrade path is per-day deltas in local state, and it can only work going
-    # forward: there is NO per-day billed source to rebuild history from. Do not
-    # re-investigate `messages` — its token_count is unpopulated (NULL on all
-    # 2414 rows) and it carries no model column, so it cannot feed a chart that
-    # stacks by model.
-    q = """SELECT date(last_seen,'unixepoch','localtime') AS d,
-                  COALESCE(model,'unknown') AS m,
-                  SUM(COALESCE(input_tokens,0)), SUM(COALESCE(output_tokens,0)),
-                  SUM(COALESCE(cache_read_tokens,0)), SUM(COALESCE(cache_write_tokens,0))
-           FROM session_model_usage
-           WHERE last_seen >= strftime('%s', 'now', ?) GROUP BY d, m"""
-    out = defaultdict(dict)
+    # Each run diffs the current counters against the previous snapshot and credits
+    # the difference to TODAY, then accumulates into a local per-day ledger. The
+    # ledger matters: the server upserts a (agent, user, date, model) row with
+    # DO UPDATE SET = excluded, replacing it, so sending just the newest delta would
+    # clobber earlier deltas from the same day. We send the day's running total.
+    #
+    # The first run has nothing to diff against, so it records a baseline and
+    # reports nothing rather than dumping all history onto today — the very bug
+    # this replaces. History before the first run is not recoverable and is not
+    # meant to be.
+    state = _load_state(state_path)
+    snap, ledger = state.get("snapshot") or {}, state.get("daily") or {}
+    cur, today = {}, datetime.date.today().isoformat()
+    # The row's identity is its primary key, but older stores predate some of
+    # those columns. Take whichever exist: dropping one only risks merging two
+    # rows that differ solely by it, and their deltas still sum correctly.
     try:
         c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        for d, m, i, o, cr, cw in c.execute(q, (f"-{days} days",)):
-            if d and (i or o or cr or cw):
-                out[d][m] = {"input": i, "output": o, "cache_read": cr, "cache_write": cw}
+        try:
+            have = {r[1] for r in c.execute("PRAGMA table_info(session_model_usage)")}
+            keycols = [k for k in ("session_id", "model", "billing_provider",
+                                   "billing_base_url", "billing_mode", "task") if k in have]
+            sel = ", ".join(f"COALESCE({k},'')" for k in keycols)
+            rows = c.execute(
+                f"""SELECT {sel}, COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+                           COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0)
+                    FROM session_model_usage""").fetchall()
+        finally:
+            c.close()
     except sqlite3.Error as e:
         FAILURES.append(f"hermes store {db}: {e}")
         return {}
-    return dict(out)
+
+    n = len(keycols)
+    mi = keycols.index("model") if "model" in keycols else None
+    fresh = not snap
+    for row in rows:
+        key = "\x1f".join(str(x) for x in row[:n])
+        m = str(row[mi]) if mi is not None else "unknown"
+        if not m:
+            m = "unknown"
+        i, o, cr, cw = row[n:]
+        cur[key] = [i, o, cr, cw]
+        if fresh:
+            continue
+        prev = snap.get(key) or [0, 0, 0, 0]
+        # A counter that went backwards means the session was reset or replaced;
+        # credit nothing rather than a negative, which would silently subtract
+        # from a day that was already reported correctly.
+        d = [max(0, n - p) for n, p in zip(cur[key], prev)]
+        if not any(d):
+            continue
+        day = ledger.setdefault(today, {})
+        acc = day.setdefault(m, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+        acc["input"] += d[0]; acc["output"] += d[1]
+        acc["cache_read"] += d[2]; acc["cache_write"] += d[3]
+
+    # Keep the ledger bounded; nothing older than the window can be reported.
+    cutoff = (datetime.date.today() - datetime.timedelta(days=max(days, 28) + 7)).isoformat()
+    ledger = {d: v for d, v in ledger.items() if d >= cutoff}
+    _save_state(state_path, {"version": 1, "snapshot": cur, "daily": ledger})
+    if fresh:
+        print("  Hermes baseline recorded — usage is reported from the next run on.")
+        return {}
+    window = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    return {d: v for d, v in ledger.items() if d >= window and any(
+        any(x.values()) for x in v.values())}
 
 
 def merge(*sources):
@@ -361,40 +426,65 @@ def self_check():
     assert merge({}, {}) == [], "no data must send no days, not a day of zeros"
     assert from_hermes(28, home="/nonexistent") == {}, "a missing store is empty, not a crash"
 
-    # Hermes stores its timestamps as unix epoch floats. Reading one as a
-    # string makes date() return NULL and every row disappear silently, which
-    # is how this collector once reported a confident zero on 30M tokens.
-    #
-    # The fixture mirrors session_model_usage, NOT sessions: the collector
-    # reads the per-model table and keys on last_seen, because the counters are
-    # cumulative and a long-lived session would otherwise land all its tokens
-    # on the day it opened.
+    # The counters are CUMULATIVE per session, so the collector diffs against a
+    # snapshot rather than dating them by a column. These assertions pin the
+    # behaviour the last_seen version got wrong: a long-lived session that is
+    # merely ACTIVE today must not republish its lifetime as today's usage.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         db = os.path.join(tmp, "state.db")
+        st = os.path.join(tmp, "state.json")
         c = sqlite3.connect(db)
         c.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
-                  " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
+                  " billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT,"
+                  " task TEXT, input_tokens INT, output_tokens INT, cache_read_tokens INT,"
                   " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
         now = time.time()
-        # opened long ago, still active today: must count as TODAY, and this is
-        # the case that used to vanish from the window entirely.
-        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
-                  ("s1", "gpt-5.5", 11, 22, 33, 44, now - 40 * 86400, now - 3600))
-        # genuinely old: excluded
-        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
-                  ("s2", "old", 1, 1, 1, 1, now - 400 * 86400, now - 400 * 86400))
-        # same session, second model: the per-model split sessions.model lost
-        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
-                  ("s1", "claude-opus-5", 5, 6, 0, 0, now - 7200, now - 3600))
-        c.commit(); c.close()
+        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  ("s1", "gpt-5.5", "", "", "", "", 1000, 2000, 3000, 4000,
+                   now - 40 * 86400, now - 3600))
+        c.commit()
 
-        got = from_hermes(28, home=tmp)
-        assert len(got) == 1, f"only the recent day should appear: {got}"
-        day = list(got.values())[0]
-        assert day["gpt-5.5"] == {"input": 11, "output": 22, "cache_read": 33, "cache_write": 44}, day
-        assert "claude-opus-5" in day, f"both models must survive the split: {day}"
-        assert "old" not in day, "a session last active 400 days ago must be excluded"
+        assert from_hermes(28, home=tmp, state_path=st) == {}, \
+            "the first run records a baseline and reports nothing"
+        today = datetime.date.today().isoformat()
+
+        assert from_hermes(28, home=tmp, state_path=st) == {}, \
+            "an unchanged session must not republish its lifetime total"
+
+        c.execute("UPDATE session_model_usage SET input_tokens = 1050 WHERE session_id='s1'")
+        c.commit()
+        got = from_hermes(28, home=tmp, state_path=st)
+        assert got == {today: {"gpt-5.5": {"input": 50, "output": 0,
+                                           "cache_read": 0, "cache_write": 0}}}, got
+
+        # A second run the same day ACCUMULATES rather than replacing: the server
+        # upserts a day's row with DO UPDATE SET = excluded, so sending only the
+        # newest delta would clobber the earlier one.
+        c.execute("UPDATE session_model_usage SET output_tokens = 2007 WHERE session_id='s1'")
+        c.commit()
+        got = from_hermes(28, home=tmp, state_path=st)
+        assert got[today]["gpt-5.5"] == {"input": 50, "output": 7,
+                                         "cache_read": 0, "cache_write": 0}, got
+
+        # A counter going backwards (session reset) credits nothing, never a
+        # negative that would subtract from an already-correct day.
+        c.execute("UPDATE session_model_usage SET input_tokens = 1 WHERE session_id='s1'")
+        c.commit()
+        got = from_hermes(28, home=tmp, state_path=st)
+        assert got[today]["gpt-5.5"]["input"] == 50, f"no negative delta: {got}"
+
+        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  ("s1", "claude-opus-5", "", "", "", "", 9, 0, 0, 0, now, now))
+        c.commit()
+        got = from_hermes(28, home=tmp, state_path=st)
+        assert got[today]["claude-opus-5"]["input"] == 9, got
+        c.close()
+
+        # A corrupt state file costs one delta, never the whole report.
+        open(st, "w").write("{not json")
+        assert from_hermes(28, home=tmp, state_path=st) == {}, \
+            "a corrupt state file rebaselines rather than crashing"
 
     assert _unknown_flags(["--oops"]) == ["--oops"], "a typo must be caught"
     assert _unknown_flags(["--body", "-1 week of work"]) == [], \
@@ -403,7 +493,7 @@ def self_check():
     assert _unknown_flags(["--body", "-a", "--oops"]) == ["--oops"], \
         "a typo after a skipped value is still caught"
 
-    print("self-check OK — merge sums both collectors, ordering, empty store, and epoch dates")
+    print("self-check OK — merge, flag parsing, and the Hermes delta collector")
 
 
 if __name__ == "__main__":
