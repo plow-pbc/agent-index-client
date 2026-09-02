@@ -689,8 +689,8 @@ def self_check():
 
     # --video takes a YouTube id because the page embeds
     # youtube-nocookie.com/embed/<id>; a URL there renders a broken player on a
-    # public page. Reject it BEFORE the device flow, so nobody signs in only to
-    # fail afterwards.
+    # public page. Reject it before anything is sent, so a typo costs a message
+    # rather than a live page with a broken player on it.
     for bad in ("https://youtu.be/abc", "youtube.com/watch?v=abc"):
         r = subprocess.run([sys.executable, os.path.abspath(__file__),
                             "--register", "--agent", "x", "--video", bad],
