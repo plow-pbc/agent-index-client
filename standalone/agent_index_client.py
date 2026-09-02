@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Publish one agent's token usage to the Agent Index.
 
-    agent_index_client.py --agent life --login      # once: prove your GitHub
     agent_index_client.py --agent life              # then: report usage
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
@@ -17,8 +16,8 @@ Collects from two places, because neither alone covers a real machine:
     zero.
 
 Sends day x model token counts and nothing else: no prompts, no task titles,
-no file paths, no costs. Identity is your GitHub account, proven once by device
-flow; the token is stored 0600 and only ever sent to github.com and the index.
+no file paths, no costs. Identity is the container's own Plow token, which the
+index resolves by asking Plow -- there is no sign-in and no second account.
 """
 import datetime
 import json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.request
@@ -34,7 +33,6 @@ try:
 except AttributeError:          # Python < 3.7
     pass
 
-CLIENT_ID = "Ov23lirUZHTGqWCMVUXV"          # public by design; device flow uses no secret
 API = os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app")
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
@@ -93,102 +91,27 @@ def _write_token(value, path=None):
         f.write(value)
 
 
-def _device_flow():
-    """GitHub device flow, returning the bearer IN MEMORY. Never writes it.
-
-    Registration needs a GitHub token — a scoped key is deliberately refused
-    there, because claiming an agent id cannot be undone by its owner. So
-    --register runs this, uses the bearer for one call, and lets it go.
-    """
-    # No scope. The server only reads the `login` field of GET /user, which is
-    # public profile data and needs no scope at all — verified against a token
-    # holding gist/read:org/repo and NOT read:user, which still returned it.
-    # This token is forwarded on every report, so it should grant as close to
-    # nothing as GitHub allows.
-    _, d = _post("https://github.com/login/device/code",
-                 {"client_id": CLIENT_ID, "scope": ""}, {})
-    if "device_code" not in d:
-        sys.exit(f"github refused the device request: {d}")
-    print(f"\n  Open {d['verification_uri']} and enter:  {d['user_code']}\n")
-    deadline = time.time() + int(d.get("expires_in", 900))
-    interval = int(d.get("interval", 5))
-    while time.time() < deadline:
-        time.sleep(interval)
-        _, t = _post("https://github.com/login/oauth/access_token",
-                     {"client_id": CLIENT_ID, "device_code": d["device_code"],
-                      "grant_type": "urn:ietf:params:oauth:grant-type:device_code"}, {})
-        if t.get("access_token"):
-            return t["access_token"]
-        if t.get("error") == "slow_down":
-            interval += int(t.get("interval", 5))
-        elif t.get("error") not in ("authorization_pending", None):
-            sys.exit(f"  device flow failed: {t.get('error_description') or t['error']}")
-    sys.exit("  code expired, run again")
-
-
-def _store_scoped_key(gh):
-    """Trade a GitHub bearer for an Index-scoped key and persist only that."""
-    code, k = _post(f"{API}/v1/keys", {"label": os.uname().nodename[:80]},
-                    {"Authorization": "Bearer " + gh})
-    if code != 200 or not k.get("key"):
-        sys.exit(f"  could not mint an Index key: {k}")
-    _write_token(k["key"])
-    return k
-
-
-def login():
-    """Prove the GitHub identity once, then hold a scoped key instead.
-
-    0600 stops other Unix users, but the agent's own runtime runs as the same
-    user and a prompt-injected turn can read its credential file — so what sits
-    there must be worth as little as possible. The scoped key reports usage and
-    publishes stories, both of which its owner can undo; it is refused by agent
-    registration, the one permanent act. Revoke it with DELETE /v1/keys.
-    """
-    k = _store_scoped_key(_device_flow())
-    print(f"  Signed in as {k.get('login')}. Index-scoped key stored at "
-          f"{TOKEN_PATH} (0600); the GitHub token was discarded.")
-    return k["key"]
-
-
 def auth_headers():
-    """Prefer the container's own Plow token when there is one.
+    """The container's own Plow token, which is the only identity there is.
 
-    Every Plow container already carries PLOW_AGENT_TOKEN, and the index can
-    resolve it to the person who owns the agent, so a container needs no GitHub
-    sign-in at all. The provider is DECLARED rather than sniffed from the token
-    shape: guessing wrong costs a round trip to the wrong service.
+    Every Plow container already carries PLOW_AGENT_TOKEN, and the index
+    resolves it to the person who owns the agent by asking Plow -- so a
+    container needs no sign-in of any kind, and there is no GitHub here.
+
+    A stored key still works for an install that has one, but nothing mints
+    new ones: minting required proving a GitHub identity, and that is gone.
     """
     plow = os.environ.get("PLOW_AGENT_TOKEN")
     if plow:
-        return {"authorization": "Bearer " + plow, "x-agent-index-auth": "plow"}
-    return auth_headers()
+        return {"authorization": "Bearer " + plow}
+    return {"authorization": "Bearer " + token()}
 
 
 def token(path=None):
     path = path or TOKEN_PATH
     if not os.path.exists(path):
-        sys.exit("no token — run with --login first")
+        sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key")
     t = open(path).read().strip()
-    if not t.startswith(("gho_", "ghu_", "ghp_")):
-        return t
-    # An instance authorised before scoped keys existed still holds the GitHub
-    # bearer on disk, where the agent's own runtime can read it. Upgrade on any
-    # run rather than only on --login: a supervisor never calls --login, so the
-    # old credential would sit there until a human remembered a documented
-    # step, and documented one-time steps get skipped. The bearer is still
-    # valid, so the exchange needs nobody present.
-    try:
-        code, k = _post(f"{API}/v1/keys", {"label": os.uname().nodename[:80]},
-                        {"Authorization": "Bearer " + t})
-        if code == 200 and k.get("key"):
-            _write_token(k["key"], path)
-            print("  upgraded the stored GitHub token to an Index-scoped key")
-            return k["key"]
-    except Exception:
-        pass
-    # Offline, or the server is down. Keep reporting with what we have rather
-    # than failing the run; the next run tries again.
     return t
 
 
@@ -407,11 +330,10 @@ def tags():
 def register(agent, argv):
     """Create this agent's row on the Index, so it has a page to report into.
 
-    Registration needs a GitHub bearer — the scoped key is refused, because
-    claiming an id is the one thing its owner cannot undo — so this runs the
-    device flow, uses the bearer for exactly one call, and never writes it. It
-    then stores a scoped key if there is not one already, so a stranger's whole
-    path is: curl the file, --register, then run it on a timer.
+    Registration is refused a key we issued ourselves, because claiming an id
+    is the one thing its owner cannot undo. It takes the container's Plow
+    token, which only Plow can vouch for, so a stranger's whole path is: curl
+    the file, --register, then run it on a timer.
     """
     def opt(flag, default=None):
         return argv[argv.index(flag) + 1] if flag in argv else default
@@ -431,8 +353,7 @@ def register(agent, argv):
     if images:
         body["images"] = images
 
-    gh = _device_flow()
-    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, {"Authorization": "Bearer " + gh})
+    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, auth_headers())
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
@@ -440,10 +361,6 @@ def register(agent, argv):
         # The server tells us what it threw away; passing that silently on
         # would recreate exactly the trap the server side just removed.
         print(f"  WARNING: some values were not stored: {out['dropped']}")
-    if not os.path.exists(TOKEN_PATH):
-        k = _store_scoped_key(gh)
-        print(f"  Index-scoped key stored at {TOKEN_PATH} (0600); "
-              f"the GitHub token was discarded.")
     print("  Now run it on a timer to report usage.")
     return 0
 
@@ -473,7 +390,7 @@ def publish_story(agent, argv):
 VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
                "--name", "--blurb", "--repo", "--runtime", "--video",
                "--builder-name", "--builder-handle"}
-KNOWN_FLAGS = {"--self-check", "--login", "--register", "--agent", "--tags", "--story",
+KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
                "--title", "--body", "--tag", "--image", "--days", "--dry-run",
                "--name", "--blurb", "--repo", "--runtime", "--video",
                "--builder-name", "--builder-handle", "--help", "-h"}
@@ -515,10 +432,6 @@ def main(argv):
         return 2 if unknown else 0
     if "--self-check" in argv:
         return self_check()
-    if "--login" in argv:
-        login()
-        if "--agent" not in argv:
-            return
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
         sys.exit(__doc__)
@@ -673,55 +586,19 @@ def self_check():
                            capture_output=True, text=True)
         assert r.returncode != 0 and "VIDEO ID" in r.stdout + r.stderr, \
             f"a video URL must be refused before signing in: {bad} -> {r.stdout+r.stderr}"
-        assert "Open https://github.com" not in r.stdout, \
-            "the device flow must not start before the arguments are checked"
+        assert "registration failed" not in r.stdout, \
+            "the arguments must be checked before anything is sent"
 
-    # A Plow container carries its own token and needs no sign-in at all. It
-    # must be PREFERRED over any stored key and must declare its provider, or
-    # the server would try to resolve a Plow token as a GitHub one.
+    # A Plow container carries its own token and needs no sign-in at all, and
+    # it must be PREFERRED over any stored key: the key is a leftover from the
+    # GitHub era and nothing mints new ones.
     os.environ["PLOW_AGENT_TOKEN"] = "plow_tok_selfcheck"
     try:
         h = auth_headers()
         assert h["authorization"] == "Bearer plow_tok_selfcheck", h
-        assert h.get("x-agent-index-auth") == "plow", \
-            "the provider must be declared, not left for the server to guess"
     finally:
         del os.environ["PLOW_AGENT_TOKEN"]
 
-    # A legacy GitHub bearer must upgrade itself on an ORDINARY run, because a
-    # supervisor never calls --login and a documented one-time step gets
-    # skipped. And a failed upgrade must never cost the report.
-    global _post
-    real_post = _post
-    with tempfile.TemporaryDirectory() as tdir:
-        tp = os.path.join(tdir, "token")
-        open(tp, "w").write("gho_legacybearer")
-        _post = lambda url, body, headers: (200, {"key": "aik_upgraded", "login": "x"})
-        try:
-            assert token(tp) == "aik_upgraded", "a legacy bearer must be exchanged"
-            on_disk = open(tp).read().strip()
-            assert on_disk == "aik_upgraded", f"and rewritten on disk: {on_disk}"
-            assert not on_disk.startswith("gho_"), "a GitHub token must never be left behind"
-
-            # Exchange fails: keep working, do not destroy the credential.
-            open(tp, "w").write("gho_legacybearer")
-            # Non-200 WITH a key-shaped body: an error page or a proxy reply
-            # must never be adopted as a credential, so the status is what
-            # decides, not the presence of the field.
-            _post = lambda url, body, headers: (500, {"key": "aik_from_an_error_body"})
-            assert token(tp) == "gho_legacybearer", \
-                "a failed upgrade must not break reporting"
-            assert open(tp).read().strip() == "gho_legacybearer", \
-                "a failed upgrade must not blank the only credential we have"
-
-            # An already-scoped key is left completely alone: no network call.
-            open(tp, "w").write("aik_already")
-            def _boom(*a, **k):
-                raise AssertionError("must not call the server for an existing key")
-            _post = _boom
-            assert token(tp) == "aik_already"
-        finally:
-            _post = real_post
 
     # An unreachable server is a reported failure, not a traceback in a
     # supervised loop's logs. Port 9 is discard: nothing listens there.
