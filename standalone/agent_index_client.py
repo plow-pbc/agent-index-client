@@ -263,7 +263,15 @@ def from_hermes(days, home=None, state_path=None):
     # this replaces. History before the first run is not recoverable and is not
     # meant to be.
     state = _load_state(state_path)
-    snap, ledger = state.get("snapshot") or {}, state.get("daily") or {}
+    # `snapshot` MISSING means we have never looked; `snapshot` present but
+    # EMPTY means we looked and the agent had not run yet. Conflating the two
+    # cost a brand-new agent its first session permanently: the empty snapshot
+    # read as "never baselined", so the first run that finally found rows
+    # re-baselined and reported nothing. A fresh install has no data by
+    # definition, which made this the normal path, not an edge case.
+    snap = state.get("snapshot")
+    fresh_install = snap is None
+    snap, ledger = snap or {}, state.get("daily") or {}
     cur, today = {}, datetime.date.today().isoformat()
     # The row's identity is its primary key, but older stores predate some of
     # those columns. Take whichever exist: dropping one only risks merging two
@@ -287,7 +295,7 @@ def from_hermes(days, home=None, state_path=None):
 
     n = len(keycols)
     mi = keycols.index("model") if "model" in keycols else None
-    fresh = not snap
+    fresh = fresh_install
     for row in rows:
         key = "\x1f".join(str(x) for x in row[:n])
         m = str(row[mi]) if mi is not None else "unknown"
@@ -527,6 +535,27 @@ def self_check():
         got = from_hermes(28, home=tmp, state_path=st)
         assert got[today]["claude-opus-5"]["input"] == 9, got
         c.close()
+
+        # A BRAND-NEW agent: the first run finds an empty store, so there is
+        # nothing to baseline. Its first real turn must still be reported —
+        # treating the empty snapshot as "never baselined" silently ate a new
+        # agent's first session, which is the most visible session it has.
+        with tempfile.TemporaryDirectory() as fresh_home:
+            st2 = os.path.join(fresh_home, "state.json")
+            c2 = sqlite3.connect(os.path.join(fresh_home, "state.db"))
+            c2.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
+                       " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
+                       " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
+            c2.commit()
+            assert from_hermes(28, home=fresh_home, state_path=st2) == {}, \
+                "an empty store reports nothing"
+            c2.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
+                       ("first", "gpt-5.5", 100, 20, 0, 0, time.time(), time.time()))
+            c2.commit()
+            got = from_hermes(28, home=fresh_home, state_path=st2)
+            c2.close()
+            assert got and list(got.values())[0]["gpt-5.5"]["input"] == 100, \
+                f"a new agent's FIRST turn must be reported, not swallowed: {got}"
 
         # A corrupt state file costs one delta, never the whole report.
         open(st, "w").write("{not json")
