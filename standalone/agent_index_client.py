@@ -146,14 +146,37 @@ def from_agentsview(days):
     return out
 
 
+def _has_usage_table(db):
+    """A store without session_model_usage is not the one we want."""
+    try:
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return bool(c.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='session_model_usage'").fetchone())
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
 def from_hermes(days, home=None):
     """Hermes' own store, which agentsview indexes but reports as all zeros.
 
     Its four counters are disjoint (prompt = input + cache_read + cache_write)
     and reasoning is a subset of output, so nothing here is double counted.
     """
-    home = home or os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-    db = os.path.join(home, "state.db")
+    # Try each known Hermes home and take the first store that really carries
+    # the table. ~/.hermes can exist while holding a different schema, and the
+    # old code errored on it instead of trying ~/.hermes-life next door, which
+    # is where a Plow agent's store actually lives. Measured, not assumed.
+    if home:
+        homes = [home]
+    elif os.environ.get("HERMES_HOME"):
+        homes = [os.environ["HERMES_HOME"]]
+    else:
+        homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
+    db = next((c for c in (os.path.join(h, "state.db") for h in homes)
+               if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
     if not os.path.exists(db):
         # Say so. A wrong HERMES_HOME otherwise reports zero tokens, which
         # reads as an idle agent rather than a misconfiguration — and inside a
@@ -251,7 +274,21 @@ def publish_story(agent, argv):
     sys.exit(0 if code == 200 else 1)
 
 
+KNOWN_FLAGS = {"--self-check", "--login", "--agent", "--tags", "--story", "--title",
+               "--body", "--tag", "--image", "--days", "--dry-run", "--help", "-h"}
+
+
 def main(argv):
+    # Reject unknown flags BEFORE any collection or POST. Without this, main()
+    # fell through to the live _post for anything it did not recognise, so
+    # `client.py --help` — the first thing a new user types — silently sent a
+    # real report to production. An unrecognised flag is a typo, not consent.
+    unknown = [a for a in argv if a.startswith("-") and a not in KNOWN_FLAGS]
+    if "--help" in argv or "-h" in argv or unknown:
+        if unknown:
+            print(f"unknown option: {unknown[0]}\n", file=sys.stderr)
+        print(__doc__.strip(), file=sys.stderr)
+        return 2 if unknown else 0
     if "--self-check" in argv:
         return self_check()
     if "--login" in argv:
