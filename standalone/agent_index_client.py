@@ -33,6 +33,9 @@ try:
 except AttributeError:          # Python < 3.7
     pass
 
+LOOPBACK = False
+
+
 def _api(url):
     """Refuse to send the Plow token over cleartext http.
 
@@ -45,6 +48,12 @@ def _api(url):
         return url
     host = url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
     if url.startswith("http://") and host in ("localhost", "127.0.0.1", "::1", "[::1]"):
+        # Only true with the proxy bypassed. urllib reads HTTP_PROXY from the
+        # environment, so on a machine with a proxy set and loopback missing
+        # from NO_PROXY -- a normal corporate box -- "it never leaves the
+        # machine" becomes "it goes to the proxy in cleartext, with the bearer".
+        global LOOPBACK
+        LOOPBACK = True
         return url
     sys.exit(f"AGENT_INDEX_API must be https (got {url!r}) — the Plow token would "
              f"travel in cleartext, and anyone on the path could then report as you")
@@ -72,7 +81,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _open_no_redirect(req, timeout=30):
-    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+    # An empty ProxyHandler for loopback: it disables urllib's environment
+    # proxy lookup for this request, which is what makes the http exception
+    # above safe. Everything else keeps the default handlers, proxy included --
+    # that traffic is https, so a proxy sees a CONNECT and not the token.
+    handlers = [_NoRedirect] + ([urllib.request.ProxyHandler({})] if LOOPBACK else [])
+    return urllib.request.build_opener(*handlers).open(req, timeout=timeout)
 
 
 def _post(url, body, headers):
@@ -271,6 +285,25 @@ def from_hermes(days, home=None, state_path=None):
         homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
     db = next((c for c in (os.path.join(h, "state.db") for h in homes)
                if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
+    if state_path is None:
+        # Beside the store it snapshots, NOT in the home directory. A container
+        # recreated with a persistent Hermes volume but a fresh home lost the
+        # ledger and the next run read as a first install -- which now means it
+        # backfills, so the loss is not silent, it is wrong. Same volume as the
+        # store means the two cannot be separated.
+        state_path = os.path.join(os.path.dirname(db), ".agent-index-state.json")
+        if not os.path.exists(state_path) and os.path.exists(STATE_PATH):
+            # An install that predates this move already has a ledger. Carrying
+            # it over is the whole point: leaving it behind would cause exactly
+            # the re-baseline this change exists to prevent.
+            legacy = _load_state(STATE_PATH)
+            if legacy and not legacy.get("unreadable"):
+                _save_state(state_path, legacy)
+                try:
+                    os.remove(STATE_PATH)
+                except OSError:
+                    pass                # readable but not removable: harmless, it is no longer read
+                print(f"  moved the usage ledger next to the Hermes store ({state_path})")
     if not os.path.exists(db):
         # Say so. A wrong HERMES_HOME otherwise reports zero tokens, which
         # reads as an idle agent rather than a misconfiguration — and inside a
@@ -721,6 +754,48 @@ def self_check():
                 f"a finished same-day session belongs to the day it ran: {got}"
             assert got[ran.isoformat()]["gpt-5.5"] == {"input": 7, "output": 3,
                                                        "cache_read": 0, "cache_write": 0}, got
+
+        # The ledger lives next to the store, not in the home directory: a
+        # container recreated with a persistent Hermes volume and a fresh home
+        # would otherwise lose it and re-baseline. An install that predates the
+        # move carries its ledger across rather than starting over.
+        with tempfile.TemporaryDirectory() as moved:
+            c4 = sqlite3.connect(os.path.join(moved, "state.db"))
+            c4.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
+                       " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
+                       " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
+            c4.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
+                       ("s", "gpt-5.5", 100, 0, 0, 0, time.time(), time.time()))
+            c4.commit()
+            beside = os.path.join(moved, ".agent-index-state.json")
+            from_hermes(28, home=moved)
+            assert os.path.exists(beside), "the ledger belongs beside the store it snapshots"
+
+            # And a run that finds a legacy ledger in the home directory adopts
+            # it instead of treating the install as new.
+            os.remove(beside)
+            legacy_home = tempfile.mkdtemp()
+            os.makedirs(os.path.join(legacy_home, ".agent-index"))
+            legacy = os.path.join(legacy_home, ".agent-index", "hermes-state.json")
+            _save_state(legacy, {"version": 1, "snapshot": {"x": [1, 1, 1, 1]}, "daily": {}})
+            global STATE_PATH
+            was, STATE_PATH = STATE_PATH, legacy
+            try:
+                import contextlib, io
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    from_hermes(28, home=moved)
+                said = buf.getvalue()
+                assert os.path.exists(beside), "the legacy ledger must be carried over"
+                assert not os.path.exists(legacy), "and not left behind to be read again"
+                # The point of carrying it: this install is NOT new, so the run
+                # must not baseline. (The snapshot it saves is the store as it
+                # is now -- that part is supposed to be replaced every run.)
+                assert "baseline recorded" not in said, \
+                    f"an install with a ledger must not start over: {said}"
+            finally:
+                STATE_PATH = was
+            c4.close()
 
         # A corrupt state file costs the ledger, never the whole report, and it
         # must not be mistaken for a first run: this install has been reporting,

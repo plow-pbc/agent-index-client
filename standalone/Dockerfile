@@ -21,6 +21,11 @@ ENV PATH=/opt/hermes/.venv/bin:$PATH
 ENV HERMES_HOME=/opt/data
 RUN mkdir -p /opt/data
 
-COPY --chmod=0755 hermes_client.py /usr/local/bin/agent-index-hermes
+# The client this repo ships, under the name the agent's reporter service
+# execs. It used to install hermes_client.py, which is the tokenmaxxing-format
+# fork kept for lineage (see FORK.md): it wants TKMX_API_KEY and posts to
+# tokenmaxxing, so a rebuild quietly shipped a reporter that cannot talk to the
+# Agent Index at all.
+COPY --chmod=0755 agent_index_client.py /usr/local/bin/agent-index-client
 
 CMD ["bash"]

@@ -11,18 +11,24 @@ const CLIENT = path.join(__dirname, "..", "..", "standalone", "agent_index_clien
 
 /** Run the client in a throwaway HOME. Never reaches the network: --dry-run
  *  prints what it would send and returns before any POST. */
-function run(home: string, env: Record<string, string | undefined> = {}) {
+function client(args: string[], home: string, env: Record<string, string | undefined> = {}) {
   const base: NodeJS.ProcessEnv = { ...process.env, HOME: home, AGENT_INDEX_API: "http://127.0.0.1:1" };
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) delete base[k]; else base[k] = v;
   }
   try {
-    return { code: 0, out: execFileSync("python3", [CLIENT, "--agent", "purge-test", "--dry-run"],
-      { encoding: "utf8", env: base }) };
+    return { code: 0, out: execFileSync("python3", [CLIENT, ...args], { encoding: "utf8", env: base }) };
   } catch (e: any) {
     return { code: e.status ?? 1, out: String(e.stdout || "") + String(e.stderr || "") };
   }
 }
+
+// The two things a run can be: a report, or the registration a fresh install
+// starts with. Same seam, different argv -- they were duplicated.
+const run = (home: string, env: Record<string, string | undefined> = {}) =>
+  client(["--agent", "purge-test", "--dry-run"], home, env);
+const register = (home: string, env: Record<string, string | undefined> = {}) =>
+  client(["--register", "--agent", "purge-test", "--name", "Purge Test"], home, env);
 
 function homeWith(token?: string) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-"));
@@ -80,21 +86,6 @@ test("a purge that cannot finish stops the run", () => {
   }
 });
 
-/** The registration path, which is where a fresh install actually starts. */
-function register(home: string, env: Record<string, string | undefined> = {}) {
-  const base: NodeJS.ProcessEnv = { ...process.env, HOME: home, AGENT_INDEX_API: "http://127.0.0.1:1" };
-  for (const [k, v] of Object.entries(env)) {
-    if (v === undefined) delete base[k]; else base[k] = v;
-  }
-  try {
-    return { code: 0, out: execFileSync("python3",
-      [CLIENT, "--register", "--agent", "purge-test", "--name", "Purge Test"],
-      { encoding: "utf8", env: base }) };
-  } catch (e: any) {
-    return { code: e.status ?? 1, out: String(e.stdout || "") + String(e.stderr || "") };
-  }
-}
-
 test("a host install registers on PLOW_AGENT_TOKEN alone, and is told where to get one", () => {
   // A fresh install outside a container has no stored key and nothing sets the
   // variable for it. Exiting with just the variable's name left that install
@@ -112,4 +103,35 @@ test("a host install registers on PLOW_AGENT_TOKEN alone, and is told where to g
   const ok = register(homeWith(), PLOW);
   assert.doesNotMatch(ok.out, /no PLOW_AGENT_TOKEN/, "an exported token is enough on any host");
   assert.match(ok.out, /could not reach|127\.0\.0\.1/);
+});
+
+test("the loopback exception bypasses the proxy it would otherwise leak through", () => {
+  // urllib reads HTTP_PROXY from the environment, so on a machine with a proxy
+  // set and loopback missing from NO_PROXY -- an ordinary corporate box -- the
+  // cleartext exception stopped meaning "never leaves the machine" and started
+  // meaning "goes to the proxy, with the bearer in it".
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-proxy-"));
+  const out = client(["--agent", "x", "--dry-run"], home, {
+    AGENT_INDEX_API: "http://127.0.0.1:1",
+    HTTP_PROXY: "http://proxy.invalid:3128",
+    http_proxy: "http://proxy.invalid:3128",
+    NO_PROXY: undefined,
+    no_proxy: undefined,
+  });
+  assert.doesNotMatch(out.out, /must be https/, "loopback is still allowed");
+
+  const src = fs.readFileSync(CLIENT, "utf8");
+  const opener = src.slice(src.indexOf("def _open_no_redirect"), src.indexOf("def _post("));
+  assert.match(opener, /ProxyHandler\(\{\}\)/, "loopback requests must disable the environment proxy");
+  assert.match(opener, /LOOPBACK/, "and only loopback: https keeps the default handlers");
+});
+
+test("the image ships the client this repo builds", () => {
+  // A rebuild used to install hermes_client.py -- the tokenmaxxing-format fork
+  // kept for lineage, which wants TKMX_API_KEY and posts to tokenmaxxing. The
+  // container came up with a reporter that cannot reach the Agent Index.
+  const dockerfile = fs.readFileSync(path.join(__dirname, "..", "..", "standalone", "Dockerfile"), "utf8");
+  assert.match(dockerfile, /COPY[^\n]*agent_index_client\.py \/usr\/local\/bin\/agent-index-client/,
+    "the image must install this client, under the name the reporter service execs");
+  assert.doesNotMatch(dockerfile, /COPY[^\n]*hermes_client\.py/, "and not the tokenmaxxing fork");
 });
