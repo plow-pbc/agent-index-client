@@ -93,8 +93,13 @@ def _write_token(value, path=None):
         f.write(value)
 
 
-def login():
-    """GitHub device flow. Works with no browser on this machine and no secret."""
+def _device_flow():
+    """GitHub device flow, returning the bearer IN MEMORY. Never writes it.
+
+    Registration needs a GitHub token — a scoped key is deliberately refused
+    there, because claiming an agent id cannot be undone by its owner. So
+    --register runs this, uses the bearer for one call, and lets it go.
+    """
     # No scope. The server only reads the `login` field of GET /user, which is
     # public profile data and needs no scope at all — verified against a token
     # holding gist/read:org/repo and NOT read:user, which still returned it.
@@ -113,27 +118,37 @@ def login():
                      {"client_id": CLIENT_ID, "device_code": d["device_code"],
                       "grant_type": "urn:ietf:params:oauth:grant-type:device_code"}, {})
         if t.get("access_token"):
-            # Exchange the GitHub bearer for an Index-scoped key and keep only
-            # that. 0600 stops other Unix users, but the agent's own runtime
-            # runs as the same user and a prompt-injected turn can read its
-            # credential file — so what sits there must be worth as little as
-            # possible. This key reports usage and publishes stories, both of
-            # which its owner can undo; it is refused by agent registration,
-            # which is the one permanent act (a claimed id cannot be released).
-            # Revoke it with DELETE /v1/keys using the GitHub login.
-            code, k = _post(f"{API}/v1/keys", {"label": os.uname().nodename[:80]},
-                            {"Authorization": "Bearer " + t["access_token"]})
-            if code != 200 or not k.get("key"):
-                sys.exit(f"  could not mint an Index key: {k}")
-            _write_token(k["key"])
-            print(f"  Signed in as {k.get('login')}. Index-scoped key stored at "
-                  f"{TOKEN_PATH} (0600); the GitHub token was discarded.")
-            return k["key"]
+            return t["access_token"]
         if t.get("error") == "slow_down":
             interval += int(t.get("interval", 5))
         elif t.get("error") not in ("authorization_pending", None):
             sys.exit(f"  device flow failed: {t.get('error_description') or t['error']}")
-    sys.exit("  code expired, run --login again")
+    sys.exit("  code expired, run again")
+
+
+def _store_scoped_key(gh):
+    """Trade a GitHub bearer for an Index-scoped key and persist only that."""
+    code, k = _post(f"{API}/v1/keys", {"label": os.uname().nodename[:80]},
+                    {"Authorization": "Bearer " + gh})
+    if code != 200 or not k.get("key"):
+        sys.exit(f"  could not mint an Index key: {k}")
+    _write_token(k["key"])
+    return k
+
+
+def login():
+    """Prove the GitHub identity once, then hold a scoped key instead.
+
+    0600 stops other Unix users, but the agent's own runtime runs as the same
+    user and a prompt-injected turn can read its credential file — so what sits
+    there must be worth as little as possible. The scoped key reports usage and
+    publishes stories, both of which its owner can undo; it is refused by agent
+    registration, the one permanent act. Revoke it with DELETE /v1/keys.
+    """
+    k = _store_scoped_key(_device_flow())
+    print(f"  Signed in as {k.get('login')}. Index-scoped key stored at "
+          f"{TOKEN_PATH} (0600); the GitHub token was discarded.")
+    return k["key"]
 
 
 def token(path=None):
@@ -375,6 +390,50 @@ def tags():
         return json.loads(r.read()).get("tags", [])
 
 
+def register(agent, argv):
+    """Create this agent's row on the Index, so it has a page to report into.
+
+    Registration needs a GitHub bearer — the scoped key is refused, because
+    claiming an id is the one thing its owner cannot undo — so this runs the
+    device flow, uses the bearer for exactly one call, and never writes it. It
+    then stores a scoped key if there is not one already, so a stranger's whole
+    path is: curl the file, --register, then run it on a timer.
+    """
+    def opt(flag, default=None):
+        return argv[argv.index(flag) + 1] if flag in argv else default
+    body = {k: v for k, v in {
+        "name": opt("--name"), "blurb": opt("--blurb"), "repo": opt("--repo"),
+        "runtime": opt("--runtime"), "builder_name": opt("--builder-name"),
+        "builder_handle": (opt("--builder-handle") or "").lstrip("@") or None,
+    }.items() if v}
+    if opt("--video"):
+        # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
+        # not a URL — passing a URL renders a broken player on a public page.
+        vid = opt("--video")
+        if "/" in vid or ":" in vid:
+            sys.exit("  --video takes a YouTube VIDEO ID, not a URL (e.g. Q_RAgwbsjGw)")
+        body["video"] = {"provider": "youtube", "id": vid, "title": opt("--name") or agent}
+    images = [argv[i + 1] for i, a in enumerate(argv) if a == "--image"]
+    if images:
+        body["images"] = images
+
+    gh = _device_flow()
+    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, {"Authorization": "Bearer " + gh})
+    if code != 200:
+        sys.exit(f"  registration failed: {code} {out}")
+    print(f"  {out.get('result')} {agent} — {out.get('url')}")
+    if out.get("dropped"):
+        # The server tells us what it threw away; passing that silently on
+        # would recreate exactly the trap the server side just removed.
+        print(f"  WARNING: some values were not stored: {out['dropped']}")
+    if not os.path.exists(TOKEN_PATH):
+        k = _store_scoped_key(gh)
+        print(f"  Index-scoped key stored at {TOKEN_PATH} (0600); "
+              f"the GitHub token was discarded.")
+    print("  Now run it on a timer to report usage.")
+    return 0
+
+
 def publish_story(agent, argv):
     """Publish one thing this agent did: a title, what happened, up to 3 tags."""
     def opt(flag, default=None):
@@ -397,9 +456,13 @@ def publish_story(agent, argv):
     sys.exit(0 if code == 200 else 1)
 
 
-VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image"}
-KNOWN_FLAGS = {"--self-check", "--login", "--agent", "--tags", "--story", "--title",
-               "--body", "--tag", "--image", "--days", "--dry-run", "--help", "-h"}
+VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
+               "--name", "--blurb", "--repo", "--runtime", "--video",
+               "--builder-name", "--builder-handle"}
+KNOWN_FLAGS = {"--self-check", "--login", "--register", "--agent", "--tags", "--story",
+               "--title", "--body", "--tag", "--image", "--days", "--dry-run",
+               "--name", "--blurb", "--repo", "--runtime", "--video",
+               "--builder-name", "--builder-handle", "--help", "-h"}
 
 
 def _unknown_flags(argv):
@@ -445,6 +508,8 @@ def main(argv):
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
         sys.exit(__doc__)
+    if "--register" in argv:
+        return register(agent, argv)
     if "--tags" in argv:
         for t in tags():
             print(f"  {t['tag']:<28} {t['uses']} uses across {t['agents']} agent(s)")
@@ -584,6 +649,19 @@ def self_check():
         assert from_hermes(28, home=tmp, state_path=st) == {}, \
             "a corrupt state file rebaselines rather than crashing"
 
+    # --video takes a YouTube id because the page embeds
+    # youtube-nocookie.com/embed/<id>; a URL there renders a broken player on a
+    # public page. Reject it BEFORE the device flow, so nobody signs in only to
+    # fail afterwards.
+    for bad in ("https://youtu.be/abc", "youtube.com/watch?v=abc"):
+        r = subprocess.run([sys.executable, os.path.abspath(__file__),
+                            "--register", "--agent", "x", "--video", bad],
+                           capture_output=True, text=True)
+        assert r.returncode != 0 and "VIDEO ID" in r.stdout + r.stderr, \
+            f"a video URL must be refused before signing in: {bad} -> {r.stdout+r.stderr}"
+        assert "Open https://github.com" not in r.stdout, \
+            "the device flow must not start before the arguments are checked"
+
     # A legacy GitHub bearer must upgrade itself on an ORDINARY run, because a
     # supervisor never calls --login and a documented one-time step gets
     # skipped. And a failed upgrade must never cost the report.
@@ -626,7 +704,6 @@ def self_check():
 
     # A quiet run must never fail because we could not ANNOUNCE that it was
     # quiet. The announcement is not the measurement.
-    import subprocess
     with tempfile.TemporaryDirectory() as empty_home:
         quiet = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],

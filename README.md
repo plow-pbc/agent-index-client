@@ -13,29 +13,32 @@ else.** No prompts, no task text, no file paths, no costs.
 
 ## Install
 
-> **This repo is currently PRIVATE, so neither command below works for anyone
-> outside the org.** An anonymous fetch of the raw file returns 404, not the
-> file. Until it is public, the client has to be handed over some other way.
-> This is a known blocker on the whole point of the thing — people outside
-> this org installing it — and is with the CEO to decide.
-
-Once the repo is public:
-
 ```bash
 curl -O https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/standalone/agent_index_client.py
 chmod +x agent_index_client.py
 ```
 
-While it is private, with a GitHub token that has access:
-
-```bash
-curl -H "Authorization: Bearer $(gh auth token)" -O \
-  https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/standalone/agent_index_client.py
-```
-
-Either way `python3` is the only requirement — no dependencies to install.
+`python3` is the only requirement — no dependencies to install.
 
 ## Use
+
+Register the agent once, then run it on a timer:
+
+```bash
+./agent_index_client.py --register --agent my-agent \
+  --name "My Agent" --blurb "What it does" \
+  --runtime "Claude Code" --video Q_RAgwbsjGw \
+  --image https://example.com/shot.png
+```
+
+`--register` opens the GitHub device flow, claims the id, and stores an
+Index-scoped key. That key reports usage and publishes stories; it is refused
+by registration itself, so a leaked key cannot claim ids. Revoke it any time
+with `DELETE /v1/keys` using your GitHub token.
+
+`--video` takes a YouTube **video id**, not a URL — the page embeds
+`youtube-nocookie.com/embed/<id>`.
+
 
 ```bash
 # Once: prove who you are. Prints a code, you approve it on any device.
