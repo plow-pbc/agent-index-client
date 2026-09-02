@@ -13,12 +13,27 @@ else.** No prompts, no task text, no file paths, no costs.
 
 ## Install
 
+> **This repo is currently PRIVATE, so neither command below works for anyone
+> outside the org.** An anonymous fetch of the raw file returns 404, not the
+> file. Until it is public, the client has to be handed over some other way.
+> This is a known blocker on the whole point of the thing — people outside
+> this org installing it — and is with the CEO to decide.
+
+Once the repo is public:
+
 ```bash
 curl -O https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/standalone/agent_index_client.py
 chmod +x agent_index_client.py
 ```
 
-Nothing else to install. `python3` is the only requirement.
+While it is private, with a GitHub token that has access:
+
+```bash
+curl -H "Authorization: Bearer $(gh auth token)" -O \
+  https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/standalone/agent_index_client.py
+```
+
+Either way `python3` is the only requirement — no dependencies to install.
 
 ## Use
 
