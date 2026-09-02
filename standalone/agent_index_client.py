@@ -270,10 +270,18 @@ def from_hermes(days, home=None, state_path=None):
     # DO UPDATE SET = excluded, replacing it, so sending just the newest delta would
     # clobber earlier deltas from the same day. We send the day's running total.
     #
-    # The first run has nothing to diff against, so it records a baseline and
-    # reports nothing rather than dumping all history onto today — the very bug
-    # this replaces. History before the first run is not recoverable and is not
-    # meant to be.
+    # The first run has no snapshot to diff against. Reporting nothing at all
+    # was a real gap -- an agent used for months, opted in, then quiet never
+    # reports anything, because "no further deltas" is exactly what a finished
+    # agent produces -- but the counters are CUMULATIVE per session, so a
+    # session that ran across 40 days cannot be split into days, and pinning its
+    # lifetime to any single one of them invents a day's usage.
+    #
+    # A session whose first_seen and last_seen fall on the SAME day can be
+    # placed, because every token it holds was spent that day. Those are
+    # backfilled; anything spanning days, or undated, is baselined and reported
+    # from the next run on. That is the whole truthful subset, and it is most of
+    # a real store.
     state = _load_state(state_path)
     # `snapshot` MISSING means we have never looked; `snapshot` present but
     # EMPTY means we looked and the agent had not run yet. Conflating the two
@@ -295,9 +303,14 @@ def from_hermes(days, home=None, state_path=None):
             keycols = [k for k in ("session_id", "model", "billing_provider",
                                    "billing_base_url", "billing_mode", "task") if k in have]
             sel = ", ".join(f"COALESCE({k},'')" for k in keycols)
+            # last_seen is when this session last spent anything, so it is the
+            # day those tokens belong to. Older stores predate the column; they
+            # get the old behaviour rather than a guess.
+            dated = "last_seen" in have and "first_seen" in have
             rows = c.execute(
                 f"""SELECT {sel}, COALESCE(input_tokens,0), COALESCE(output_tokens,0),
-                           COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0)
+                           COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0),
+                           {"COALESCE(first_seen,0), COALESCE(last_seen,0)" if dated else "0, 0"}
                     FROM session_model_usage""").fetchall()
         finally:
             c.close()
@@ -308,14 +321,33 @@ def from_hermes(days, home=None, state_path=None):
     n = len(keycols)
     mi = keycols.index("model") if "model" in keycols else None
     fresh = fresh_install
+
+    def _day(ts):
+        try:
+            return datetime.date.fromtimestamp(float(ts)).isoformat() if ts else None
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    def day_of(first_seen, last_seen):
+        """The one day a session's whole total belongs to, or None if there is
+        no such day -- it spanned several, or the store cannot say.
+
+        Clamped to today: a clock skewed forward would otherwise open a day in
+        the future that no window reports and nothing can correct."""
+        a, b = _day(first_seen), _day(last_seen)
+        return min(b, today) if a and a == b else None
+
     for row in rows:
         key = "\x1f".join(str(x) for x in row[:n])
         m = str(row[mi]) if mi is not None else "unknown"
         if not m:
             m = "unknown"
-        i, o, cr, cw = row[n:]
+        i, o, cr, cw = row[n:n + 4]
         cur[key] = [i, o, cr, cw]
-        if fresh:
+        placed = day_of(row[n + 4], row[n + 5]) if fresh else None
+        if fresh and placed is None:
+            # It spanned days, or is undated: any day we picked would be
+            # invented. Baseline it and report from the next run on.
             continue
         prev = snap.get(key) or [0, 0, 0, 0]
         # A counter that went backwards means the session was reset or replaced;
@@ -324,7 +356,10 @@ def from_hermes(days, home=None, state_path=None):
         d = [max(0, n - p) for n, p in zip(cur[key], prev)]
         if not any(d):
             continue
-        day = ledger.setdefault(today, {})
+        # A delta seen since the last run was spent since the last run, so it
+        # belongs to today. Only a first-run backfill places a session anywhere
+        # else, and only when its own timestamps name a single day.
+        day = ledger.setdefault(placed or today, {})
         acc = day.setdefault(m, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
         acc["input"] += d[0]; acc["output"] += d[1]
         acc["cache_read"] += d[2]; acc["cache_write"] += d[3]
@@ -334,8 +369,10 @@ def from_hermes(days, home=None, state_path=None):
     ledger = {d: v for d, v in ledger.items() if d >= cutoff}
     _save_state(state_path, {"version": 1, "snapshot": cur, "daily": ledger})
     if fresh:
-        print("  Hermes baseline recorded — usage is reported from the next run on.")
-        return {}
+        filled = len(ledger)
+        print(f"  Hermes baseline recorded — {filled} day(s) of same-day history recovered."
+              if filled else
+              "  Hermes baseline recorded — usage is reported from the next run on.")
     window = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
     return {d: v for d, v in ledger.items() if d >= window and any(
         any(x.values()) for x in v.values())}
@@ -615,10 +652,40 @@ def self_check():
             assert got and list(got.values())[0]["gpt-5.5"]["input"] == 100, \
                 f"a new agent's FIRST turn must be reported, not swallowed: {got}"
 
-        # A corrupt state file costs one delta, never the whole report.
+        # An agent USED BEFORE it opted in. Its finished same-day sessions land
+        # on the days they actually ran, so an agent that goes quiet right after
+        # opting in still reports the work it did -- "no further deltas" is
+        # exactly what a finished agent produces, and reporting nothing left it
+        # blank forever. A session that spanned days holds one cumulative number
+        # for all of them, so it cannot be split and is not invented onto one.
+        with tempfile.TemporaryDirectory() as used:
+            st3 = os.path.join(used, "state.json")
+            c3 = sqlite3.connect(os.path.join(used, "state.db"))
+            c3.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT,"
+                       " input_tokens INT, output_tokens INT, cache_read_tokens INT,"
+                       " cache_write_tokens INT, first_seen REAL, last_seen REAL)")
+            # Midday, so an hour either side cannot cross midnight and flake.
+            ran = datetime.date.today() - datetime.timedelta(days=3)
+            noon = datetime.datetime.combine(ran, datetime.time(12, 0)).timestamp()
+            c3.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
+                       ("done", "gpt-5.5", 7, 3, 0, 0, noon, noon + 3600))
+            c3.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?)",
+                       ("spanning", "gpt-5.5", 500, 0, 0, 0, noon - 9 * 86400, noon))
+            c3.commit()
+            got = from_hermes(28, home=used, state_path=st3)
+            c3.close()
+            assert list(got) == [ran.isoformat()], \
+                f"a finished same-day session belongs to the day it ran: {got}"
+            assert got[ran.isoformat()]["gpt-5.5"] == {"input": 7, "output": 3,
+                                                       "cache_read": 0, "cache_write": 0}, got
+
+        # A corrupt state file costs the ledger, never the whole report: it
+        # rebaselines rather than crashing, and re-places what it can still
+        # place truthfully (the same-day sessions above).
         open(st, "w").write("{not json")
-        assert from_hermes(28, home=tmp, state_path=st) == {}, \
-            "a corrupt state file rebaselines rather than crashing"
+        got = from_hermes(28, home=tmp, state_path=st)
+        assert got == {today: {"claude-opus-5": {"input": 9, "output": 0,
+                                                 "cache_read": 0, "cache_write": 0}}}, got
 
     # --video takes a YouTube id because the page embeds
     # youtube-nocookie.com/embed/<id>; a URL there renders a broken player on a
