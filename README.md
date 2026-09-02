@@ -1,463 +1,92 @@
-# Builder Index Client
+# Agent Index Client
 
-Reports your local coding-agent token usage — whatever agentsview indexes, Claude Code and Codex and Pi and OpenCode among them — to the [Builder Index](https://aiworthusing.com/builder-index). Each user gets a shareable profile page at `aiworthusing.com/builder-index/u/YOUR_NAME`.
+Publishes what an agent is doing to the [Agent Index](https://aiworthusing.com/agent-index):
+its day-by-model token usage, and the stories of what it actually accomplished.
 
-## Quick Start
+Python standard library only — no node, no build step, no dependencies — because
+this runs where the agent runs, which is usually a container or a small VPS.
 
-```bash
-# Install agentsview (required). See https://agentsview.io/quickstart/ for
-# platform-specific install; the canonical one-liner is:
-curl -fsSL https://agentsview.io/install.sh | bash
+## What it sends
 
-git clone git@github.com:srosro/tkmx-client.git
-cd tkmx-client && npm install
-cp .env.example .env              # then edit .env (see below)
-npm run report                    # test it
-npm run install-service           # auto-report every 2 hours
-```
+Token counts per day per model, and stories you choose to publish. **Nothing
+else.** No prompts, no task text, no file paths, no costs.
 
-> New to the client or upgrading from v1.x? See [Upgrading from v1.x](#upgrading-from-v1x) for the `v1.2.0` pinning option if you can't install agentsview.
-
-## Setup
-
-### 1. Install dependencies
-
-[agentsview](https://www.agentsview.io/token-usage/) is required — it reads your local agent usage data from an incrementally-synced SQLite index, and the reporter collects every agent that index holds, which is dramatically faster than walking every transcript on each report.
-
-**macOS / Linux:**
+## Install
 
 ```bash
-curl -fsSL https://agentsview.io/install.sh | bash
+curl -O https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/standalone/agent_index_client.py
+chmod +x agent_index_client.py
 ```
 
-**Windows:**
+Nothing else to install. `python3` is the only requirement.
 
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://agentsview.io/install.ps1 | iex"
-```
-
-The installer drops the binary in `~/.local/bin/agentsview` by default. If you install somewhere else (nix, asdf, custom prefix), set `AGENTSVIEW_BIN=/path/to/agentsview` in your `.env` and tkmx-client will use that. See https://agentsview.io/quickstart/ for more. Usage from every agent AgentsView indexes is auto-detected from its supported default locations — no extra setup beyond agentsview.
-
-> **Previously using ccusage?** v1.x of this client used `ccusage`. If you prefer the old flow and don't want to install agentsview, pin to the v1.2.0 tag:
->
-> ```bash
-> cd tkmx-client
-> git checkout v1.2.0
-> npm install
-> ```
->
-> See [Upgrading from v1.x](#upgrading-from-v1x) for details.
-
-### 2. Clone and install
-
-```
-git clone git@github.com:srosro/tkmx-client.git
-cd tkmx-client
-npm install        # installs deps + builds dist/ (runs `npm run build` via prepare hook)
-```
-
-> **Build:** the source is TypeScript; runtime ships compiled JS from `dist/`. `npm install` triggers the build automatically. To rebuild manually: `npm run build`. The launchd plist / systemd unit written by `install-service` points at `dist/reporter/report.js`, so end-user machines need only Node — no global TypeScript install required.
-
-### 3. Register your username
-
-Pick a unique username and provide your email. First come, first served.
-
-```
-curl -s -X POST https://aiworthusing.com/api/register \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"YOUR_NAME", "email":"you@example.com"}'
-```
-
-Save the returned API key — it cannot be retrieved later. The response `profile` is your Builder Index page (`https://aiworthusing.com/builder-index/u/YOUR_NAME`).
-
-> **Hosts:** the public board is the **Builder Index** at `aiworthusing.com/builder-index`, and your profile is `aiworthusing.com/builder-index/u/YOUR_NAME`. Leave `SERVER_URL` unset — registration and reporting work out of the box.
-
-> Email is required at registration but kept private. It is never displayed or returned by any API.
-
-### 4. Configure `.env`
-
-```
-cp .env.example .env
-```
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `USERNAME` | Yes | Your registered username |
-| `API_KEY` | Yes | The key returned by `/api/register` |
-| `TEAM` | No | Your team name (default: `default`) |
-| `TOOLS` | No | What AI coding tools do you actually use daily? (see [Tools, Projects & Communities](#tools-projects--communities)) |
-| `PROJECTS` | No | What are you spending tokens on? The projects you're actively building with AI. |
-| `COMMUNITIES` | No | What developer communities are you part of? |
-| `ABOUT` | No | The main content of your profile — describe your setup, link to tools you use, share blog posts/videos about your workflow. URLs are auto-linked. See [Profile Page](#profile-page) |
-| `DEMO_VIDEO_URL` | No | YouTube URL (**3 min or shorter**) showing your before/after AI coding workflow. Embedded on your profile page under "3-MIN DEMO VIDEO". |
-| `HN_USERNAME` | No | Your Hacker News username (e.g. `Sam_Odio`). Required to appear on the Builder Index — see [HN Verification](#appearing-on-the-builder-index-hn-verification) |
-| `AVATAR` | No | **Not active yet — needs server support.** A picture for your profile, intended to replace the generated letter avatar. Either an `https://` image URL, `gravatar:you@example.com`, or `github:yourhandle`. https only; the Gravatar form hashes your address locally so your email never leaves your machine. The client reports it, but the profile page does not render it yet, so setting this has no visible effect today. |
-| `OPENCLAW_SESSIONS_DIRS` | No | Override OpenClaw auto-discovery with a comma-separated list of session directories. Defaults to auto-discovery of standalone + Plow variants on macOS. See [OpenClaw Usage](#openclaw-usage). |
-| `REPORT_DAYS` | No | Days of history to report (default: `28`). See [Backfill & Optimization](#backfill--optimization) |
-| `REPORT_MACHINE_CONFIG` | No | Set to `true` to share machine info (OS, CPU, memory, installed skills, MCP servers, hooks, CLAUDE.md stats, shell/editor) on your profile. No prompts, code, or keys are ever sent. |
-| `SKILLS_EXCLUDE` | No | Comma-separated skill or MCP server names to keep off your profile, e.g. `warp,clerk-setup`. Case-insensitive. See [Which skills get reported](#which-skills-get-reported). |
-| `REPORT_DEV_STATS` | No | Set to `true` to share how you code — tool-call frequencies, session stats, cache efficiency, git outcome metrics (commits/LOC/PRs), and Cursor AI attribution. No file paths, prompts, or code are ever sent. See [Dev Stats](#dev-stats). |
-| `REPORT_SESSION_STATS` | No | Defaults to `true` when `REPORT_DEV_STATS=true`. Shells out to `agentsview stats --format json` to collect cross-agent session analytics (portfolio, archetype, velocity, temporal patterns, cache economics). Set to `false` to opt out — on the next report the server will clear your stored session_stats blob. The opt-out marker is tracked per-checkout in `.reporting-state.json`, so if you flip the toggle in one sibling checkout the clear signal only fires from that checkout's reporter. |
-
-### 5. First run
-
-```
-npm run report
-```
-
-```
-[2026-04-08T12:30:40.544Z] Collecting 28d usage since 20260311 for your-name (team: your-team)
-  claude (local): 23 days
-  codex (local): 5 days
-  opencode (local): 8 days
-  pi (local): 3 days
-[2026-04-08T12:30:44.237Z] Server responded 200: {"ok":true,"rows":72}
-```
-
-A `CLIENT_ID` is auto-generated on first run and saved to `.env`. This identifies your machine so multiple machines can report for the same username without overwriting each other.
-
-> **⚠ Don't touch `CLIENT_ID` once it's set.** Usage rows are keyed on `(username, date, model, client_id, source)` server-side. If you delete `.env`, re-clone into a new directory, or paste a fresh `.env` that omits the line, a new id is generated and the server treats your machine as brand new — the old id's rows stay behind and every overlapping date gets double-counted on your profile. When updating, always `git pull` in place rather than re-cloning. If you must re-clone, copy `CLIENT_ID` from the old `.env` first.
-
-### 6. Install the background service
-
-```
-npm run install-service
-```
-
-Uses **launchd** on macOS, **systemd** on Linux. Starts immediately, survives reboots, runs every 2 hours.
-
-Verify it's running:
+## Use
 
 ```bash
-# macOS
-launchctl list | grep token-tracking
+# Once: prove who you are. Prints a code, you approve it on any device.
+# No browser needed on this machine, and no secret is stored in the image.
+./agent_index_client.py --agent life --login
 
-# Linux
-systemctl --user status token-tracking-reporter.timer
+# Then: report usage. Run it on whatever schedule you like.
+./agent_index_client.py --agent life
+
+# See what it would send, without sending it
+./agent_index_client.py --agent life --dry-run
+
+# Publish a story about something the agent did
+./agent_index_client.py --agent life --tags          # tags already in use
+./agent_index_client.py --agent life \
+    --story amazon-refund \
+    --title "Got $53.64 back from Amazon" \
+    --body "Sat in a long support chat and got the refund." \
+    --tag "Orders & returns"
 ```
 
-## Updating
+Read `--tags` before publishing and reuse an existing tag. "Orders & returns"
+and "Order returns" would split one bar in two and nothing would line up
+across agents.
+
+## Where it reads usage from
+
+Two sources, summed, because neither covers a real machine alone:
+
+- **agentsview**, the same index the Builder Index client reads. Rich and
+  correct for `claude` and `codex`.
+- **the Hermes store directly**, at `$HERMES_HOME/state.db` (default
+  `~/.hermes/state.db`). agentsview indexes Hermes sessions but reports **zero
+  tokens** for every one, so without this a Hermes agent lands on the index at
+  zero.
+
+**Set `HERMES_HOME` explicitly in a container.** A wrong path is not an error —
+it reads as zero tokens, which looks like an idle agent rather than a
+misconfiguration.
+
+## Packaging it into an agent image
+
+Bake the **client**. Never bake the **token**.
+
+`~/.agent-index/token` is a real GitHub credential identifying a *person*, not
+a machine. In an image layer, anyone who pulls the image can extract it and
+report as that person — and every container from that image counts as one
+install instead of many. Make `~/.agent-index` a writable volume and let each
+install run `--login` once.
+
+Running with no token exits and says so, rather than reporting anonymously.
+
+## Configuration
+
+| Variable | Meaning |
+| --- | --- |
+| `AGENT_INDEX_API` | Server base URL. Defaults to the live one. |
+| `HERMES_HOME` | Hermes instance home holding `state.db`. Default `~/.hermes`. |
+| `AGENT_ID` | Used when `--agent` is not passed. |
+
+## Checking it works
 
 ```bash
-cd tkmx-client
-git pull
-npm install        # rebuilds dist/ via the prepare hook
+./agent_index_client.py --self-check
 ```
 
-Your existing config (credentials, `CLIENT_ID`) is preserved — `git pull` never touches `.env`. **Do not re-clone or delete `.env` as an "update" — see the CLIENT_ID warning in [First run](#5-first-run).**
-
-> **Pre-TypeScript installs:** if your launchd plist or systemd unit was installed before the TypeScript migration, it still points at `reporter/report.js`. A compatibility shim at that path forwards to the compiled `dist/reporter/report.js`, so the daemon keeps working. To get a clean unit pointing at `dist/` directly, re-run `npm run install-service` once after this update — the shim can then be removed in a future release.
-
-> **Homebrew `node@NN` installs:** if your service was installed against a versioned Homebrew formula (`node@22`, `node@24`, …), its unit still points at the raw `Cellar/` path, which the next `brew upgrade` deletes — the reporter then stops silently. `npm install` only rebuilds `dist/`; re-run `npm run install-service` once to repoint the unit at the stable `opt/` symlink.
-
-### What's new
-
-If you're updating an existing install, refer to the config table above and add any new `.env` values you don't already have:
-
-| Setting | What it does |
-|---------|-------------|
-| `REPORT_MACHINE_CONFIG=true` | Shares your machine setup (OS, CPU, memory, installed skills) on your [profile page](#profile-page). **No prompts, code, conversation history, or API keys are ever sent.** |
-| `PROJECTS=tkmx,plow.co` | Projects you're building. Shown as badges on your profile and the Builder Index. |
-| `COMMUNITIES=bloomberg-ai-engineering,agentcribs-community` | Developer communities you're part of. Shown as badges on your profile and the Builder Index. |
-| `ABOUT="..."` | Bio, config details, and links shown on your profile. Share your setup — blog posts, tweets, or videos where you've discussed your workflow. URLs are auto-linked. |
-| `REPORT_DAYS=1` | Only send the last day of new token-usage rows each cycle instead of 28. Session stats, Cursor stats, and other rolling-window aggregates always carry a fixed 28-day window and are unaffected. Recommended after your first sync. |
-| `DEMO_VIDEO_URL=https://www.youtube.com/watch?v=...` | YouTube demo video (**3 min or shorter**) embedded on your profile. Show before/after workflows — how you worked before AI tools vs. after. |
-| `HN_USERNAME=Sam_Odio` | Your Hacker News username. Required for Builder Index visibility — see [HN Verification](#appearing-on-the-builder-index-hn-verification). |
-| `AVATAR=github:yourhandle` | **Not active yet — needs server support.** A picture for your profile, intended to replace the generated letter avatar. Also accepts an `https://` image URL or `gravatar:you@example.com`. Square images look best — it's rendered as a circle. |
-| `REPORT_DEV_STATS=true` | Shares how you code — tool frequencies, session stats, cache efficiency, git outcomes, Cursor attribution. See [Dev Stats](#dev-stats). |
-
-`CLIENT_ID` is auto-generated on first run and written to `.env` — you don't need to set it. If you already have one, it's kept as-is.
-
-## Upgrading from v1.x
-
-> **⚠️ BREAKING in v1.3.0:** agentsview is now a **hard dependency**. If you don't have it installed, `npm run report` will exit with an install-or-pin message on first run. This is technically a breaking change under SemVer — we kept it as a minor bump because the user pool is small, the fix is a one-line install, and the pin path to `v1.2.0` is explicit and supported.
-
-v1.3.0 replaces `ccusage` + the direct codex sqlite reader with [agentsview](https://www.agentsview.io/token-usage/) for all local Claude and Codex token collection. `EXTRA_CLAUDE_CONFIGS` / `EXTRA_CODEX_CONFIGS` — the features for aggregating usage from extra `~/.claude` / `~/.codex` homes — also go through agentsview (each creates a per-home sqlite under `~/.agentsview-tkmx/<hash>/` for isolated incremental sync).
-
-### Why upgrade?
-
-1. **Correct codex token counts.** v1.x's `~/.codex/state_*.sqlite` reader was silently dropping cache-read tokens. Expect your **codex `total_tokens` to jump ~+90%** on active codex machines (Claude numbers are unaffected). This is agentsview counting tokens that were always being spent but never appearing in your reports — **a correction, not inflation.** Nothing is double-counted.
-2. **Accurate cost.** agentsview computes per-field cost via LiteLLM and the server respects it, so codex dollar figures on your profile go from server-side blended estimates to actual per-model rates.
-3. **~200× faster** on large histories via agentsview's incremental SQLite sync, instead of walking every JSONL transcript on every run.
-4. **Bonus: free session viewer.** You now have `agentsview` installed — run `agentsview` in a terminal and you get a full local web UI for browsing and full-text-searching every Claude + Codex session you've ever had. It's a real product, not a data-access tool. See https://agentsview.io for the full feature set.
-5. **Single install story going forward.** One dependency to install, not "ccusage or codex-sqlite-reader depending on which flag you set."
-
-**If you can install agentsview:** `git pull`, install agentsview, run `npm run report`. That's it — existing `.env` settings are unchanged. The `USE_AGENTSVIEW` flag and `CCUSAGE_TIMEOUT_MS` are gone (delete them from your `.env` if present — they're ignored).
-
-**If you can't or don't want to install agentsview:** pin to the last ccusage-based release. This is a real, working version — it will stay reachable:
-
-```bash
-cd tkmx-client
-git checkout v1.2.0
-npm install
-npm run report
-```
-
-You lose access to future improvements, but the v1.2.0 flow (ccusage + codex sqlite) continues to work against the server.
-
-## Backfill & Optimization
-
-By default the reporter sends 28 days of history. To backfill older data or optimize steady-state reporting:
-
-**Backfill** — set `REPORT_DAYS=365` in `.env` and run once:
-
-```bash
-npm run report
-```
-
-**Optimize** — after your initial sync, change to `REPORT_DAYS=1` in `.env` so the background service only re-sends the last day of token-usage rows each cycle instead of 28 days every 2 hours. Session stats (agent portfolio, temporal patterns, streaks) and Cursor stats always ship their full 28-day window regardless — they're wholesale-replaced on the server, so a short window would scrub prior history.
-
-You can always do a manual full re-sync of the token-usage rows by temporarily setting `REPORT_DAYS=28` and running `npm run report`.
-
-## Multiple Machines
-
-The client supports reporting from multiple machines under the same username. Each machine gets its own `CLIENT_ID` (auto-generated on first run), and the server tracks data per-machine. Setup on each machine is identical — just use the same `USERNAME`, `API_KEY`, and `TEAM` in `.env`.
-
-Your [profile page](https://aiworthusing.com/builder-index) shows how many machines you're reporting from.
-
-### Aggregating from synced remote machines
-
-If you already sync `~/.claude` from other machines to a central location (e.g. via rsync, Syncthing, or a tool like [engineering-notebook](https://github.com/obra/engineering-notebook)), you can aggregate all of them into a single report without installing the client on each machine. Set `EXTRA_CLAUDE_CONFIGS` in `.env` to a comma-separated list of directories, each containing a `projects/` subdirectory of Claude Code JSONL sessions:
-
-```
-EXTRA_CLAUDE_CONFIGS=/path/to/synced-laptop,/path/to/synced-desktop
-```
-
-The reporter runs `agentsview` once per directory (each with its own `AGENT_VIEWER_DATA_DIR` under `~/.agentsview-tkmx/<hash>/` and `CLAUDE_PROJECTS_DIR` pointing at `<dir>/projects`) and merges the results with the local machine's usage before submitting. Each remote mirror gets its own incrementally-synced sqlite, so re-runs are cheap.
-
-The Codex equivalent is `EXTRA_CODEX_CONFIGS` — a comma-separated list of Codex homes, each containing a `sessions/` subdirectory (the `~/.codex` layout). Use it to fold in Codex accounts whose data lives outside the local `~/.codex`, e.g. a reviewer bot's per-account homes. It works the same way (one `agentsview` run per home, isolated `AGENT_VIEWER_DATA_DIR`, `CODEX_SESSIONS_DIR` pointing at `<home>/sessions`) and its usage sums into the `codex` source. A configured home that can't be collected — missing `sessions/`, or any agentsview failure — aborts the run rather than POSTing a silent partial; fix the path in `.env` and the next run recovers.
-
-```
-EXTRA_CODEX_CONFIGS=/path/to/codex-account-a,/path/to/codex-account-b
-```
-
-Pi harness and OpenCode can be aggregated the same way when their data lives outside the local machine's default AgentsView scan. These config values point directly at the data directory AgentsView should scan, not at a nested `projects/` or `sessions/` subdirectory:
-
-```
-EXTRA_PI_CONFIGS=/path/to/pi-data-a,/path/to/pi-data-b
-EXTRA_OPENCODE_CONFIGS=/path/to/opencode-data-a,/path/to/opencode-data-b
-```
-
-Pi reports under the `pi` source and OpenCode reports under the `opencode` source. A configured directory that does not exist, or that AgentsView cannot collect, aborts the run before POSTing so the report cannot silently undercount declared sources.
-
-## OpenAI Platform Usage
-
-If you make OpenAI API calls directly (not through Codex CLI), you can pull token usage from `platform.openai.com/usage` and merge it into your reports. This covers any OpenAI API usage — your own scripts, agents, third-party tools authenticated with your API keys, etc.
-
-1. Create an admin API key at [platform.openai.com/settings/organization/admin-keys](https://platform.openai.com/settings/organization/admin-keys) (must be an Organization Owner). Regular project keys won't work — the org usage endpoint requires an admin key.
-2. Add it to `.env`:
-   ```
-   OPENAI_ADMIN_KEY=sk-admin-...
-   ```
-3. Run `npm run report`. You'll see a new `OpenAI platform` line in the output.
-
-The client only *reads* usage data; it never sends your admin key anywhere except `api.openai.com`. Reports use the `/v1/organization/usage/completions` endpoint, which covers chat completions and the Responses API — essentially all OpenAI token volume for most users.
-
-> **⚠️ Don't double-count Codex CLI:** If your Codex CLI is authenticated with an OpenAI API key (rather than a ChatGPT Plus/Pro subscription), its traffic already appears in platform usage. Enabling `OPENAI_ADMIN_KEY` alongside Codex collection will double-count those tokens. Leave `OPENAI_ADMIN_KEY` unset if Codex is on API-key auth.
-
-## OpenClaw Usage
-
-If you run [OpenClaw](https://openclaw.ai) sessions locally — standalone or wrapped by [Plow](https://plow.co) on macOS — token usage is read directly from session JSONL transcripts and merged into your reports under the `openclaw` source. No setup required: the reporter auto-discovers session directories on each run.
-
-**Discovery paths (macOS):**
-
-- Standalone install: `~/.openclaw/agents/main/sessions/`
-- Plow (any variant): `~/Library/Application Support/co.plow.app*/*/gateway/agents/main/sessions/` — picks up `co.plow.app`, `co.plow.app.dev`, `co.plow.app.wt1`, dev/worktree variants, etc. The segment between the bundle and `gateway/` is discovered rather than named: Plow has already renamed it once (`openclaw/` → `agent-runtime/`), and both layouts resolve.
-
-**Other platforms:** Only the standalone path is probed. Plow is macOS-only.
-
-To point the reporter at non-default install locations (or to scope reporting to a subset of installs), set `OPENCLAW_SESSIONS_DIRS` in `.env` to one or more sessions directories, comma-separated:
-
-```
-OPENCLAW_SESSIONS_DIRS=/custom/path/agents/main/sessions,/another/path/agents/main/sessions
-```
-
-The override replaces the auto-discovered list entirely. Each directory is scanned for `*.jsonl` files; `*.trajectory.jsonl` and `sessions.json` are ignored. Cross-file and cross-root duplicates are deduped by each LLM call's `responseId`, so running multiple Plow variants that share OpenClaw data won't double-count.
-
-## Profile Page
-
-Each user gets a shareable profile at `https://aiworthusing.com/builder-index/u/YOUR_NAME` showing:
-
-- Token usage stats (28-day and all-time)
-- Claude vs Codex cost breakdown
-- Model breakdown by tokens
-- Daily usage chart (28 days)
-- Tools, projects, and community badges
-- Number of reporting machines
-- Your bio from the `ABOUT` field
-
-The `ABOUT` field is the main content of your profile. This is your chance to help other developers by sharing what tools you use and how you use them. Link to the tools, share blog posts, or tweets about your workflow:
-
-```
-ABOUT="Building with https://github.com/nickarail/arsenal — 3x founder, shipping AI-first products"
-```
-
-URLs are auto-linked on your profile page. The more detail you share, the more useful your profile is to the community.
-
-### 3-Min Demo Video
-
-Set `DEMO_VIDEO_URL` to a YouTube link — **keep it to 3 minutes or shorter**. It embeds on your profile under the "3-MIN DEMO VIDEO" heading. This is the single most useful thing you can share with other developers.
-
-```
-DEMO_VIDEO_URL=https://www.youtube.com/watch?v=YiDcgyAn-88
-```
-
-**The goal is one aha moment.** Pick a single concrete task and show how AI has changed the way you do it. Structure it as old world → new world:
-
-- **Old world (~1 min).** One task you used to do before AI. Spell out the friction: the manual steps, how long it took, the parts that made you dread it. Keep this short — the viewer needs enough context to feel the old pain, but not a full re-enactment.
-- **New world (~2 min).** The same task today. Show the prompt, the agent's output, the shipped result. Don't cut away from the screen — let people see the actual workflow land. The viewer should finish thinking "I want that."
-
-**Why 3 minutes?** It's a social contract. The discipline of cutting to 3 minutes is also what forces the demo to be actually good — if you can't show the transformation in that time, the transformation isn't as clear as you thought, and watching a longer cut won't fix it.
-
-## Appearing on the Builder Index (HN Verification)
-
-To prevent fake accounts, new users must verify a Hacker News account to appear on the Builder Index. Here's how:
-
-1. Set `HN_USERNAME` in your `.env` (e.g. `HN_USERNAME=Sam_Odio`)
-2. Run `npm run report` so the server knows your HN username
-3. Add your Builder Index profile URL — `https://aiworthusing.com/builder-index/u/YOUR_NAME` — to your [HN about section](https://news.ycombinator.com/user). For a live example, see [Sam_Odio's HN profile](https://news.ycombinator.com/user?id=Sam_Odio). If your about section already carries an older `watchmepivot.com` or `tkmx.odio.dev` profile URL, leave it — those still verify, so there's nothing to update.
-4. Visit your Builder Index profile and click "Verify"
-
-HN may cache your about section for a few minutes. If verification fails, wait a minute and try again.
-
-You can still register, report usage, and view your profile without verification — you just won't appear on the public Builder Index.
-
-## Tools, Projects & Communities
-
-Everyone's tweeting about the latest hot AI tool, but most of it is vaporware. By listing what you actually use day-to-day, you help the developer community see what's real and what's hype. Your usage data — backed by actual token spend — shows what tools people are building with in production, not just what they tried once and posted about.
-
-All three fields show as clickable badges on your profile and the Builder Index.
-
-```
-TOOLS=superpowers,arsenal
-PROJECTS=tkmx,plow.co
-COMMUNITIES=bloomberg-ai-engineering,agentcribs-community
-```
-
-- **TOOLS** — What AI coding tools do you actually use daily? Only list what you really use, not everything you've tried.
-- **PROJECTS** — What are you spending tokens on? The projects you're actively building with AI. Shows up as "building:" on your profile.
-- **COMMUNITIES** — What developer communities are you part of? Clickable filters on the Builder Index.
-
-> **⚠ Adding a badge is easy; removing one is a command.** These three fields are **additive** — reporting a list adds any new entries to what your profile already shows, it does not replace the stored list. Deleting an entry from `.env`, or blanking the whole line, leaves the server's copy intact and the badge stays up. All three fields behave the same way.
->
-> Removal is a separate verb, and it's self-service — no admin needed:
->
-> ```
-> npm run untag -- --list                  # what the server actually has stored
-> npm run untag -- tools "WhsprFlow"       # remove one badge
-> npm run untag -- projects "Old Project"
-> ```
->
-> Points worth knowing:
->
-> - **Clear it from every machine first, or it comes back.** Removal takes the badge off the server; it does not stop a machine from sending it again. Any machine whose `.env` (or exported shell variable) still lists that badge will re-add it on its next report, and reporting is usually running on a timer. Delete it from **every** reporting configuration, then remove it — otherwise you're racing the scheduler.
-> - **Check the stored list first.** What's in your `.env` isn't necessarily what's on your profile — every machine that has ever reported is unioned into it, so the stored list is usually longer. `--list` shows the real thing, which is also the exact text a removal has to match.
-> - **Typos are sticky, but no longer permanent.** A misspelled tool name becomes an extra badge until you remove it by name.
-> - **Matching ignores case but not spacing.** `wispr flow` will remove `Wispr Flow`, but `WisprFlow` is a genuinely different badge and needs its own removal. That's also why near-duplicates appear in the first place.
-> - **Removal goes to the API host.** It uses `SERVER_URL` (the same host the reporter posts to), not the Builder Index address you visit in a browser. If you see a 404, that's the wrong host rather than a missing badge — the command says so.
-> - **A badge containing `/` can't be removed by this command.** The badge text travels as part of the URL, and a slash can't be addressed there. Nothing stops you *creating* one — whatever you put in `TOOLS` is sent as-is — so avoid slashes in badge names, and ask an admin if you already have one.
->
-> The underlying endpoint is specified in the server's OpenAPI document (`/openapi.yaml` on the API host) if you'd rather call it directly.
->
-> Your list is otherwise rendered exactly as stored — original order, no sorting, no de-duplication.
-
-### Known Tools
-
-| Tool | Description |
-|------|-------------|
-| [superpowers](https://github.com/nickarail/superpowers) | Claude Code skills for TDD, planning, debugging |
-| [arsenal](https://github.com/nickarail/arsenal) | Extended Claude Code skill set |
-| [paperclip](https://github.com/paperclipai/paperclip) | AI coding agent framework |
-| [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex) | Codex CLI enhancements |
-| [cmux](https://cmux.com/) | AI coding multiplexer |
-
-## Dev Stats
-
-Set `REPORT_DEV_STATS=true` to share how you actually code. This helps the community learn from top developers' workflows — what tools they use, how they use them, and what they ship.
-
-**What's collected:**
-
-| Category | Data | Source |
-|----------|------|--------|
-| **Workflow shape** | Tool-call frequencies (Edit, Read, Bash, Grep, Agent, etc.), avg tools per turn, subagent dispatch count, plan-mode entries | Claude Code JSONL transcripts |
-| **Session stats** | Sessions/period, avg session length, hour-of-day histogram | Claude Code JSONL timestamps |
-| **Cache efficiency** | Cache reuse ratio (cache reads / total prompt tokens) | Claude Code JSONL usage blocks |
-| **Git outcomes** | Commits, LOC ±, files changed, PRs opened/merged (aggregate across all repos) | `git log` and `gh` in repos Claude touched |
-| **Cursor attribution** | Tab-completion vs composer vs human lines, AI-authored %, conversations by model/mode | `~/.cursor/ai-tracking/ai-code-tracking.db` |
-
-**What's never sent:** file paths, prompt content, tool arguments, repo names, code, commit messages, API keys.
-
-The `REPORT_MACHINE_CONFIG` flag also now includes your configuration stack: MCP server names (no credentials), hook event types, CLAUDE.md size, shell/terminal/editor, and git worktree count.
-
-### Which skills get reported
-
-With `REPORT_MACHINE_CONFIG=true`, the skills on your profile come from three sources, merged and deduplicated:
-
-| Source | Read from | Reported as |
-|--------|-----------|-------------|
-| Installed plugins | `~/.claude/plugins/installed_plugins.json` | One entry per plugin (`superpowers`), not one per skill inside it |
-| Personal skills | `~/.claude/skills/*/` | The directory name, but only if it contains a `SKILL.md` |
-| MCP servers | `~/.claude/settings.json` and `settings.local.json` | The server name only — taken from an `mcpServers` block, or derived from `mcp__<server>__*` permission entries |
-
-Deriving servers from permission entries matters for hosts that register MCP servers at runtime rather than writing an `mcpServers` block — before this, those servers were never reported at all despite being documented as such.
-
-#### Where a skill links to
-
-A skill on your profile is a name, and a name alone cannot be a link. So alongside the list, the client reports `machine_config.claude_skill_links` — a `{name: url}` map covering the subset of your skills that have a canonical public home, which the profile uses to render those chips as links.
-
-Only plugin-sourced skills resolve, because only they carry an upstream. The URL is whichever of these comes first:
-
-| Preference | Read from | Example |
-|---|---|---|
-| The author's homepage | `homepage` in the marketplace manifest | `superpowers` → `https://github.com/obra/superpowers` |
-| The source repo | `source.url`, plus `/tree/<ref>/<path>` when the plugin is one of many in the repo | `https://github.com/adobe/skills/tree/main/plugins/creative-cloud/…` |
-| The marketplace itself | a repo-relative `source` resolved against the marketplace's own repo | `gopls-lsp` → `…/claude-plugins-official/tree/HEAD/plugins/gopls-lsp` |
-
-**Personal skills and MCP servers never resolve**, and neither does anything you list in `TOOLS` — a directory name or a hand-typed tool name has no upstream to point at. Those are simply absent from the map, which is what lets the profile mark them as unlinkable rather than linking them somewhere wrong. A skill is never given a link that 404s.
-
-Only `https` URLs with a real public hostname are ever sent. A marketplace installed from a local checkout yields `file://` paths or `git@host:owner/repo` remotes, and publishing either would leak a home directory or an internal hostname onto a public profile — those are dropped, not repaired. `SKILLS_EXCLUDE` drops a name's link along with the name.
-
-Set `SKILLS_EXCLUDE` to keep specific entries off your profile. It is a comma-separated list, matched case-insensitively, and it drops a name regardless of which source produced it:
-
-```
-SKILLS_EXCLUDE=warp,clerk-setup,clerk-testing
-```
-
-Excluding a name does retract one already published. This is worth stating explicitly because the badge fields above (`TOOLS`, `PROJECTS`) behave the opposite way — they are additive, and blanking them leaves the server's copy intact. Skills are not: each machine's list is stored under that machine and replaced wholesale on every report. Verified against production on 2026-08-12 by excluding a previously-published entry and watching it disappear from that machine's stored `machine_config.claude_skills`.
-
-Two caveats still apply. Your profile shows the **union across all your machines**, so an entry disappears only once every machine that reports it has excluded it — doing so on one machine is not enough. And if a separate application also reports on your behalf, it publishes its own list, which this setting cannot reach.
-
-## Cost Estimation
-
-Cost is calculated server-side using current API pricing:
-
-- **Claude models** — estimated per token type (input, output, cache write, cache read) when agentsview doesn't provide cost. When agentsview reports accurate cost, that's used as-is.
-- **Codex models** — estimated using blended rates since Codex only reports total tokens (no input/output split).
-
-You don't need to worry about pricing — the server handles it.
-
-## How It Works
-
-[`agentsview`](https://www.agentsview.io/token-usage/) is the required local usage collector. It maintains its own sqlite database synced from supported local agent data directories. The reporter runs `agentsview sync`, reads the agents that index actually holds (`SELECT DISTINCT agent FROM sessions`), and then queries each one via `agentsview usage daily --json --breakdown --agent <agent> --no-sync`. Sync comes first because discovery reads the index: an agent whose first session landed since the last sync has to be written before we look.
-
-Deriving the list from the index rather than naming agents means whatever agentsview learns to parse — it already handles copilot, gemini, cursor, iflow and amp beyond claude/codex/pi/opencode — is collected the first time it writes a session, with no client release.
-
-When `EXTRA_CLAUDE_CONFIGS`, `EXTRA_CODEX_CONFIGS`, `EXTRA_PI_CONFIGS`, or `EXTRA_OPENCODE_CONFIGS` is set, the reporter runs one agentsview invocation per extra home, each with its own `AGENT_VIEWER_DATA_DIR` (under `~/.agentsview-tkmx/<hash>/`) and the matching source dir env — `CLAUDE_PROJECTS_DIR` (`<home>/projects`) for Claude, `CODEX_SESSIONS_DIR` (`<home>/sessions`) for Codex, `PIEBALD_DIR` (`<home>`) for Pi, and `OPENCODE_DIR` (`<home>`) for OpenCode. This keeps each home in its own isolated sqlite — incremental sync works per-home and the local machine's `~/.agentsview/sessions.db` stays clean.
-
-The reporter merges daily token-usage rows from every discovered agent, plus the OpenAI platform and OpenClaw collectors, client-side into `body.data` and POSTs them to the Tokenmaxxing server. Cursor stats and session stats ship in separate body fields (`cursor_stats`, `session_stats`) — they are wholesale-replaced rolling-window blobs, not per-day token rows. Each report replaces previous data for the same machine and date range, so re-syncs are safe and idempotent.
-
-## Logs
-
-```bash
-# macOS
-cat ~/Library/Logs/token-tracking-reporter.log
-
-# Linux
-journalctl --user -u token-tracking-reporter
-```
-
-## Manual Report
-
-```
-npm run report
-```
+Asserts the collector merge, ordering, an empty result, a missing store, and
+epoch-format timestamps — that last one because Hermes stores `started_at` as a
+unix float, and reading it as a string makes every row silently vanish.
