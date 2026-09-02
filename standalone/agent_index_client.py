@@ -125,8 +125,14 @@ def purge_legacy_github_token(path=None):
     try:
         os.remove(path)
     except OSError as e:
-        print(f"  a leftover GitHub token at {path} could NOT be removed: {e}")
-        return False
+        # Stop the run. Continuing would leave a live GitHub credential in a
+        # file this client can no longer use, on a machine whose owner believes
+        # it is gone -- and the next run would find it and fail the same way,
+        # silently, forever. A read-only home is a five-second fix once someone
+        # is told; nothing tells them if we report normally.
+        sys.exit(f"  a leftover GitHub token at {path} could NOT be removed: {e}\n"
+                 f"  refusing to run while it is still there — delete it, or make "
+                 f"{os.path.dirname(path)} writable")
     print("  removed a leftover GitHub token; this client no longer uses one")
     return True
 
@@ -140,7 +146,11 @@ def token(path=None):
         # auth would hand a GitHub token to a service that never wanted one.
         if t and not t.startswith(GITHUB_PREFIXES):
             return t
-    sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key")
+    sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key.\n"
+             "Inside a Plow container it is already there. Anywhere else, export the\n"
+             "one Plow minted for your agent — agent-mgr writes it to that agent's\n"
+             "own ~/.hermes-<agent>/.env, and a running container will print it:\n"
+             "  export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)")
 
 
 def from_agentsview(days):

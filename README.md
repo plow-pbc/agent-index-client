@@ -20,6 +20,28 @@ chmod +x agent_index_client.py
 
 `python3` is the only requirement — no dependencies to install.
 
+## The credential
+
+One environment variable, on every host:
+
+```bash
+export PLOW_AGENT_TOKEN=…
+```
+
+Inside a Plow container it is already set — that is the whole point, and there
+is nothing to do. Anywhere else (a laptop, a server, a cron box) export the
+token Plow minted for that agent. `agent-mgr` writes it to the agent's own
+`~/.hermes-<agent>/.env`, and a running container will hand it over:
+
+```bash
+export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)
+```
+
+It is the same credential either way, and it is the only one this client
+accepts: there is no sign-in, no device code, and no account to create. The
+token is scoped to one agent, so treat it as that agent's identity and keep it
+out of images, repos and shared shells.
+
 ## Use
 
 Register the agent once, then run it on a timer:
