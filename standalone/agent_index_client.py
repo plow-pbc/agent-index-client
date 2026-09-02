@@ -74,6 +74,18 @@ def _post(url, body, headers):
         return e.code, json.loads(e.read() or b"{}")
 
 
+def _write_token(value):
+    """0600, and the directory too: a world-readable parent makes the mode moot."""
+    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+    try:
+        os.chmod(os.path.dirname(TOKEN_PATH), 0o700)
+    except OSError:
+        pass
+    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value)
+
+
 def login():
     """GitHub device flow. Works with no browser on this machine and no secret."""
     # No scope. The server only reads the `login` field of GET /user, which is
@@ -94,12 +106,22 @@ def login():
                      {"client_id": CLIENT_ID, "device_code": d["device_code"],
                       "grant_type": "urn:ietf:params:oauth:grant-type:device_code"}, {})
         if t.get("access_token"):
-            os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-            fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(t["access_token"])
-            print(f"  Signed in. Token stored at {TOKEN_PATH} (0600).")
-            return t["access_token"]
+            # Exchange the GitHub bearer for an Index-scoped key and keep only
+            # that. 0600 stops other Unix users, but the agent's own runtime
+            # runs as the same user and a prompt-injected turn can read its
+            # credential file — so what sits there must be worth as little as
+            # possible. This key reports usage and publishes stories, both of
+            # which its owner can undo; it is refused by agent registration,
+            # which is the one permanent act (a claimed id cannot be released).
+            # Revoke it with DELETE /v1/keys using the GitHub login.
+            code, k = _post(f"{API}/v1/keys", {"label": os.uname().nodename[:80]},
+                            {"Authorization": "Bearer " + t["access_token"]})
+            if code != 200 or not k.get("key"):
+                sys.exit(f"  could not mint an Index key: {k}")
+            _write_token(k["key"])
+            print(f"  Signed in as {k.get('login')}. Index-scoped key stored at "
+                  f"{TOKEN_PATH} (0600); the GitHub token was discarded.")
+            return k["key"]
         if t.get("error") == "slow_down":
             interval += int(t.get("interval", 5))
         elif t.get("error") not in ("authorization_pending", None):
