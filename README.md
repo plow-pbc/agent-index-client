@@ -31,21 +31,19 @@ Register the agent once, then run it on a timer:
   --image https://example.com/shot.png
 ```
 
-`--register` opens the GitHub device flow, claims the id, and stores an
-Index-scoped key. That key reports usage and publishes stories; it is refused
-by registration itself, so a leaked key cannot claim ids. Revoke it any time
-with `DELETE /v1/keys` using your GitHub token.
+`--register` claims the id using the container's own `PLOW_AGENT_TOKEN`. Only
+Plow can vouch for that token, and registration refuses a key the index issued
+itself — so a leaked key cannot claim an id, which is the one act an owner
+cannot undo.
 
 `--video` takes a YouTube **video id**, not a URL — the page embeds
 `youtube-nocookie.com/embed/<id>`.
 
 
 ```bash
-# Once: prove who you are. Prints a code, you approve it on any device.
-# No browser needed on this machine, and no secret is stored in the image.
-./agent_index_client.py --agent life --login
-
-# Then: report usage. Run it on whatever schedule you like.
+# Report usage. Run it on whatever schedule you like.
+# No sign-in step: a Plow container already carries PLOW_AGENT_TOKEN, and the
+# index asks Plow whose it is.
 ./agent_index_client.py --agent life
 
 # See what it would send, without sending it
@@ -83,13 +81,16 @@ misconfiguration.
 
 Bake the **client**. Never bake the **token**.
 
-`~/.agent-index/token` is a real GitHub credential identifying a *person*, not
-a machine. In an image layer, anyone who pulls the image can extract it and
-report as that person — and every container from that image counts as one
-install instead of many. Make `~/.agent-index` a writable volume and let each
-install run `--login` once.
+Identity comes from `PLOW_AGENT_TOKEN`, which each container already has and
+which is scoped to that container's own agent — so nothing identifying belongs
+in an image layer, and two installs are never mistaken for one.
 
-Running with no token exits and says so, rather than reporting anonymously.
+A leftover `~/.agent-index/token` from the GitHub era is deleted on first use
+rather than sent: nothing can exchange it any more, and a GitHub bearer must
+not be handed to a service that never had one.
+
+Running with no credential exits and says so, rather than reporting
+anonymously.
 
 ## Configuration
 

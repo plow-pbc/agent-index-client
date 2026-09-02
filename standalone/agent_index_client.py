@@ -78,18 +78,6 @@ def _post(url, body, headers):
         return 0, {"error": f"could not reach {url}: {e.reason}"}
 
 
-def _write_token(value, path=None):
-    """0600, and the directory too: a world-readable parent makes the mode moot."""
-    path = path or TOKEN_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        os.chmod(os.path.dirname(path), 0o700)
-    except OSError:
-        pass
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(value)
-
 
 def auth_headers():
     """The container's own Plow token, which is the only identity there is.
@@ -107,12 +95,28 @@ def auth_headers():
     return {"authorization": "Bearer " + token()}
 
 
+# What a stored credential may look like now. A gho_/ghu_/ghp_ value is a
+# GitHub bearer from before this client dropped GitHub; there is nothing left
+# that can exchange it, and sending it as Plow auth would hand a GitHub token
+# to a service that never had one -- so it is removed rather than used.
+GITHUB_PREFIXES = ("gho_", "ghu_", "ghp_")
+
+
 def token(path=None):
     path = path or TOKEN_PATH
-    if not os.path.exists(path):
-        sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key")
-    t = open(path).read().strip()
-    return t
+    if os.path.exists(path):
+        t = open(path).read().strip()
+        if t and not t.startswith(GITHUB_PREFIXES):
+            return t
+        if t:
+            # Deleted, not ignored: leaving it on disk leaves a live GitHub
+            # credential in a file whose whole point was to stop holding one.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            print("  removed a leftover GitHub token; this client no longer uses one")
+    sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key")
 
 
 def from_agentsview(days):
@@ -469,9 +473,14 @@ def main(argv):
         # first act dies on a network hiccup, having measured and lost nothing.
         # token() exits the process when there is no credential, and SystemExit
         # is a BaseException that `except Exception` would not catch — so check
-        # for the file first rather than letting the announcement turn a quiet
-        # run on an unconfigured machine into a failure.
-        if os.path.exists(TOKEN_PATH):
+        # that a credential EXISTS before announcing, rather than letting a
+        # quiet run on an unconfigured machine turn into a failure.
+        #
+        # The check is "have we any credential", not "is there a token file":
+        # a container has PLOW_AGENT_TOKEN and no file at all, and gating on
+        # the file skipped the announcement for exactly the installs this
+        # client now exists to serve.
+        if os.environ.get("PLOW_AGENT_TOKEN") or os.path.exists(TOKEN_PATH):
             try:
                 _post(f"{API}/v1/usage?agent_id={agent}", {"days": [], "status": "pending"},
                       auth_headers())
