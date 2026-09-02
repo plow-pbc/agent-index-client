@@ -2,8 +2,10 @@
 """Publish one agent's token usage to the Agent Index.
 
     agent_index_client.py --agent life --login      # once: prove your GitHub
-    agent_index_client.py --agent life              # then: report
+    agent_index_client.py --agent life              # then: report usage
     agent_index_client.py --agent life --dry-run    # show what would be sent
+    agent_index_client.py --agent life --tags       # tags already in use
+    agent_index_client.py --agent life --story ID --title T [--body B] [--tag T]...
     agent_index_client.py --self-check
 
 Collects from two places, because neither alone covers a real machine:
@@ -144,6 +146,40 @@ def merge(*sources):
             for d, ms in sorted(out.items())]
 
 
+def tags():
+    """Tags already in use across the index, commonest first.
+
+    Pick from these rather than inventing a near-duplicate: "Orders & returns"
+    and "Order returns" would split one bar in two and nothing would line up
+    across agents.
+    """
+    req = urllib.request.Request(f"{API}/v1/tags", headers={"accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read()).get("tags", [])
+
+
+def publish_story(agent, argv):
+    """Publish one thing this agent did: a title, what happened, up to 3 tags."""
+    def opt(flag, default=None):
+        return argv[argv.index(flag) + 1] if flag in argv else default
+    story_id = opt("--story")
+    title = opt("--title")
+    if not story_id or not title:
+        sys.exit("--story ID and --title TEXT are both required")
+    chosen = [argv[i + 1] for i, a in enumerate(argv) if a == "--tag"][:3]
+    if len(chosen) > 3:
+        sys.exit("at most 3 tags")
+    body = {
+        "story_id": story_id, "title": title, "body": opt("--body", ""),
+        "tags": chosen,
+        "images": [{"url": u, "caption": ""} for i, a in enumerate(argv) if a == "--image" for u in [argv[i + 1]]],
+    }
+    code, out = _post(f"{API}/v1/stories?agent_id={agent}", body,
+                      {"authorization": f"Bearer {token()}"})
+    print(f"  {code} {out}")
+    sys.exit(0 if code == 200 else 1)
+
+
 def main(argv):
     if "--self-check" in argv:
         return self_check()
@@ -154,6 +190,12 @@ def main(argv):
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
         sys.exit(__doc__)
+    if "--tags" in argv:
+        for t in tags():
+            print(f"  {t['tag']:<28} {t['uses']} uses across {t['agents']} agent(s)")
+        return
+    if "--story" in argv:
+        return publish_story(agent, argv)
     days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 28
     payload = {"days": merge(from_agentsview(days), from_hermes(days))}
     total = sum(m[k] for d in payload["days"] for m in d["models"] for k in KEYS)
