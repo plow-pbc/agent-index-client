@@ -274,8 +274,29 @@ def publish_story(agent, argv):
     sys.exit(0 if code == 200 else 1)
 
 
+VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image"}
 KNOWN_FLAGS = {"--self-check", "--login", "--agent", "--tags", "--story", "--title",
                "--body", "--tag", "--image", "--days", "--dry-run", "--help", "-h"}
+
+
+def _unknown_flags(argv):
+    """Flags we do not recognise, ignoring the VALUES of value-taking flags.
+
+    A story body legitimately starts with a dash ("-1 week of work..."), so
+    scanning every dash-leading token rejected exactly the use cases agents
+    publish. Skip the token after a value flag.
+    """
+    unknown, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in VALUE_FLAGS:
+            skip = True
+            continue
+        if a.startswith("-") and a not in KNOWN_FLAGS:
+            unknown.append(a)
+    return unknown
 
 
 def main(argv):
@@ -283,7 +304,10 @@ def main(argv):
     # fell through to the live _post for anything it did not recognise, so
     # `client.py --help` — the first thing a new user types — silently sent a
     # real report to production. An unrecognised flag is a typo, not consent.
-    unknown = [a for a in argv if a.startswith("-") and a not in KNOWN_FLAGS]
+    # Skip the VALUE after a value-taking flag: a story body legitimately starts
+    # with a dash ("-1 week of work..."), and treating it as an unknown option
+    # rejected exactly the use cases agents publish.
+    unknown = _unknown_flags(argv)
     if "--help" in argv or "-h" in argv or unknown:
         if unknown:
             print(f"unknown option: {unknown[0]}\n", file=sys.stderr)
@@ -371,6 +395,13 @@ def self_check():
         assert day["gpt-5.5"] == {"input": 11, "output": 22, "cache_read": 33, "cache_write": 44}, day
         assert "claude-opus-5" in day, f"both models must survive the split: {day}"
         assert "old" not in day, "a session last active 400 days ago must be excluded"
+
+    assert _unknown_flags(["--oops"]) == ["--oops"], "a typo must be caught"
+    assert _unknown_flags(["--body", "-1 week of work"]) == [], \
+        "a dash-leading VALUE is not a flag"
+    assert _unknown_flags(["--dry-run", "--agent", "x"]) == [], "known flags pass"
+    assert _unknown_flags(["--body", "-a", "--oops"]) == ["--oops"], \
+        "a typo after a skipped value is still caught"
 
     print("self-check OK — merge sums both collectors, ordering, empty store, and epoch dates")
 
