@@ -1129,6 +1129,9 @@ def self_check():
     # is THERE and has nothing in it -- an agent that has not worked yet.
     with tempfile.TemporaryDirectory() as empty_home:
         make_store(empty_home).close()
+        os.makedirs(os.path.join(empty_home, ".agent-index"))
+        with open(os.path.join(empty_home, ".agent-index", "token"), "w") as f:
+            f.write("aik_" + "k" * 43)
         quiet = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
