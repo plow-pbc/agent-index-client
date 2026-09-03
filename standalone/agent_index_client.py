@@ -85,6 +85,7 @@ def _shown(url):
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", ""))
+PLOW_API = _api(os.environ.get("PLOW_API_BASE", "https://api.plow.co"))
 LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
@@ -158,6 +159,22 @@ def auth_headers():
     if plow:
         return {"authorization": "Bearer " + plow}
     return {"authorization": "Bearer " + token()}
+
+
+def index_assertion():
+    plow = os.environ.get("PLOW_AGENT_TOKEN")
+    if not plow:
+        sys.exit("no PLOW_AGENT_TOKEN in the environment")
+    req = urllib.request.Request(PLOW_API + "/v1/auth/index-identity",
+                                 headers={"authorization": "Bearer " + plow, "accept": "application/json"})
+    try:
+        with _open_no_redirect(req) as response:
+            assertion = json.loads(response.read() or b"{}").get("assertion")
+    except urllib.error.HTTPError as exc:
+        sys.exit(f"  could not get Plow assertion: {exc.code}")
+    if not isinstance(assertion, str):
+        sys.exit("  Plow did not return an Index assertion")
+    return {"authorization": "Bearer " + assertion}
 
 
 # The one shape a stored credential may have: the index mints aik_ + 43
@@ -622,8 +639,7 @@ def register(agent, argv):
         return argv[argv.index(flag) + 1] if flag in argv else default
     body = {k: v for k, v in {
         "name": opt("--name"), "blurb": opt("--blurb"), "repo": opt("--repo"),
-        "runtime": opt("--runtime"), "builder_name": opt("--builder-name"),
-        "builder_handle": (opt("--builder-handle") or "").lstrip("@") or None,
+        "runtime": opt("--runtime"),
     }.items() if v}
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
@@ -636,7 +652,8 @@ def register(agent, argv):
     if images:
         body["images"] = images
 
-    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, auth_headers())
+    assertion = index_assertion()
+    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
@@ -671,11 +688,11 @@ def publish_story(agent, argv):
 
 VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
                "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--builder-name", "--builder-handle"}
+               }
 KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
                "--title", "--body", "--tag", "--image", "--days", "--dry-run",
                "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--builder-name", "--builder-handle", "--help", "-h"}
+               "--help", "-h"}
 
 
 def _unknown_flags(argv):
