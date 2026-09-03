@@ -153,3 +153,9 @@ Asserts the collector merge, ordering, an empty result, a configured store that
 is missing (which must fail and must not post), a partial report being refused,
 the usage ledger moving beside its store, and epoch-format timestamps — that last one because Hermes stores `started_at` as a
 unix float, and reading it as a string makes every row silently vanish.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 2025 The Plow Collective, Inc.
+
+"Plow" and the Plow logo are trademarks of The Plow Collective, Inc. The license grants no trademark rights.
