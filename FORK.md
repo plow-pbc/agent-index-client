@@ -17,8 +17,15 @@ That is a different product, not a flag:
 ## `standalone/`
 
 The Node reporter needs node, npm and AgentsView. Agents live in containers and
-on $5 VPSes, so the standalone clients are Python stdlib only — no node, no
-AgentsView, no build step — and read each runtime's own store directly.
+on $5 VPSes, so the standalone client is Python stdlib only — no node, no npm,
+no build step.
+
+It is not AgentsView-free, and the distinction matters when reading a report:
+it CALLS `agentsview usage daily --json` when that binary is installed, because
+for claude and codex those numbers are the correct ones, and says so when it is
+absent rather than reporting a zero it never measured. What it does not do is
+depend on AgentsView for Hermes, which AgentsView indexes but reports as all
+zeros — that it reads from `$HERMES_HOME/state.db` itself, and merges the two.
 
 - `agent_index_client.py` — the client. Reads the runtime's own store, reports
   to the Agent Index as the container's `PLOW_AGENT_TOKEN`. Carries

@@ -295,6 +295,9 @@ def from_hermes(days, home=None, state_path=None):
     db = next((c for c in (os.path.join(h, "state.db") for h in homes)
                if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
     legacy_lost = False
+    # The store is resolved BEFORE the ledger moves anywhere: a wrong or unset
+    # HERMES_HOME would otherwise move the only copy into a directory that holds
+    # no store, and delete the original on the way. See the gate below.
     if state_path is None:
         # Beside the store it snapshots, NOT in the home directory. A container
         # recreated with a persistent Hermes volume but a fresh home lost the
@@ -302,7 +305,12 @@ def from_hermes(days, home=None, state_path=None):
         # backfills, so the loss is not silent, it is wrong. Same volume as the
         # store means the two cannot be separated.
         state_path = os.path.join(os.path.dirname(db), ".agent-index-state.json")
-        if not os.path.exists(state_path) and os.path.exists(STATE_PATH):
+        # Only migrate to a home that actually holds the store this ledger
+        # describes. A misconfigured HERMES_HOME points at a directory with no
+        # state.db, and moving the only ledger there -- then deleting the
+        # original -- loses it for the correctly configured run that follows.
+        if (os.path.exists(db) and not os.path.exists(state_path)
+                and os.path.exists(STATE_PATH)):
             # An install that predates this move already has a ledger. Carrying
             # it over is the whole point: leaving it behind would cause exactly
             # the re-baseline this change exists to prevent.
@@ -315,12 +323,20 @@ def from_hermes(days, home=None, state_path=None):
                 # migration instead of the front door.
                 legacy_lost = True
             elif legacy:
+                # Copy, verify, then delete. The original is the only copy until
+                # the new one is readable and says what the old one said.
                 _save_state(state_path, legacy)
-                try:
-                    os.remove(STATE_PATH)
-                except OSError:
-                    pass                # readable but not removable: harmless, it is no longer read
-                print(f"  moved the usage ledger next to the Hermes store ({state_path})")
+                if _load_state(state_path) == legacy:
+                    try:
+                        os.remove(STATE_PATH)
+                    except OSError:
+                        pass            # readable but not removable: harmless, it is no longer read
+                    print(f"  moved the usage ledger next to the Hermes store ({state_path})")
+                else:
+                    # Keep both rather than lose one. The destination is what
+                    # gets read from here, and the original is still there to
+                    # recover from if it turns out to be wrong.
+                    print(f"  copied the usage ledger to {state_path}, keeping {STATE_PATH}")
     if not os.path.exists(db):
         # Say so. A wrong HERMES_HOME otherwise reports zero tokens, which
         # reads as an idle agent rather than a misconfiguration — and inside a
@@ -809,6 +825,29 @@ def self_check():
                 # is now -- that part is supposed to be replaced every run.)
                 assert "baseline recorded" not in said, \
                     f"an install with a ledger must not start over: {said}"
+            finally:
+                STATE_PATH = was
+
+            # A WRONG home must not consume the ledger. HERMES_HOME pointing
+            # somewhere with no store is a configuration mistake, and moving the
+            # only copy there -- then deleting the original -- turns it into
+            # data loss for the run that gets it right afterwards.
+            os.remove(beside)
+            nowhere = tempfile.mkdtemp()          # no state.db in it
+            keep_home = tempfile.mkdtemp()
+            os.makedirs(os.path.join(keep_home, ".agent-index"))
+            keep = os.path.join(keep_home, ".agent-index", "hermes-state.json")
+            _save_state(keep, {"version": 1, "snapshot": {"y": [2, 2, 2, 2]}, "daily": {}})
+            was, STATE_PATH = STATE_PATH, keep
+            try:
+                from_hermes(28, home=nowhere)
+                assert os.path.exists(keep), "a home with no store must not consume the ledger"
+                assert not os.path.exists(os.path.join(nowhere, ".agent-index-state.json")), \
+                    "and must not leave a ledger where there is nothing to snapshot"
+                # The correctly configured run still gets it.
+                from_hermes(28, home=moved)
+                assert os.path.exists(beside) and not os.path.exists(keep), \
+                    "the right home adopts it"
             finally:
                 STATE_PATH = was
 
