@@ -311,10 +311,23 @@ def _save_state(path, state):
 CHILD_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ",
                   "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
 
+# agentsview's OWN configuration, from `agentsview --help` (v0.38.1), not from
+# memory. Everything with an AGENTSVIEW_ prefix passes by the rule below; these
+# are the ones that do not carry it -- the per-runtime source directories. An
+# install that points agentsview at its data through one of these and does not
+# get it back reads the DEFAULT location, finds little or nothing there, and
+# reports a total that is wrong rather than absent.
+AGENTSVIEW_SOURCE_DIRS = (
+    "CLAUDE_PROJECTS_DIR", "CODEX_SESSIONS_DIR", "COPILOT_DIR", "GEMINI_DIR",
+    "OPENCODE_DIR", "CURSOR_PROJECTS_DIR", "IFLOW_DIR", "AMP_DIR", "ZED_DIR",
+    "QWEN_PROJECTS_DIR", "QWENPAW_DIR", "OMP_DIR", "DEEPSEEK_TUI_SESSIONS_DIR",
+    "QCLAW_DIR", "WORKBUDDY_PROJECTS_DIR", "PIEBALD_DIR",
+)
+
 
 def _child_env():
     env = {k: v for k, v in os.environ.items()
-           if k in CHILD_ENV_KEEP or k.startswith("AGENTSVIEW_")}
+           if k in CHILD_ENV_KEEP or k in AGENTSVIEW_SOURCE_DIRS or k.startswith("AGENTSVIEW_")}
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     return env
 
@@ -590,9 +603,11 @@ def tags():
         with _open_no_redirect(req) as r:
             return json.loads(r.read()).get("tags", [])
     except Exception as e:
-        # Same rule as _post: the failure is reported, the URL is not.
-        print(f"  could not read tags from {_shown(url)}: {type(e).__name__}")
-        return []
+        # Same rule as _post: the failure is reported, the URL is not. And it
+        # IS a failure -- returning [] told the caller there are no tags in use,
+        # which is a real answer to a different question, and `--tags` then
+        # exited 0 having read nothing.
+        sys.exit(f"  could not read tags from {_shown(url)}: {type(e).__name__}")
 
 
 def register(agent, argv):

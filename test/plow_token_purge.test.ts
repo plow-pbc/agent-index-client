@@ -201,6 +201,55 @@ echo '[]'
   assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
 });
 
+test("agentsview keeps its own configuration", () => {
+  // Withholding a secret must not withhold the tool's own settings: an install
+  // that points agentsview at its data through one of these and does not get
+  // it back reads the DEFAULT location and reports a total that is WRONG rather
+  // than absent. The list comes from `agentsview --help` (v0.38.1).
+  const CONFIG = {
+    AGENTSVIEW_DATA_DIR: "/tmp/av-data",
+    CLAUDE_PROJECTS_DIR: "/tmp/claude-projects",
+    CODEX_SESSIONS_DIR: "/tmp/codex-sessions",
+    CURSOR_PROJECTS_DIR: "/tmp/cursor-projects",
+    OPENCODE_DIR: "/tmp/opencode",
+    ZED_DIR: "/tmp/zed",
+  };
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-avcfg-"));
+  const bin = path.join(home, "bin");
+  fs.mkdirSync(bin);
+  const seen = path.join(home, "seen.txt");
+  fs.writeFileSync(path.join(bin, "agentsview"), `#!/bin/sh
+env > ${seen}
+echo '[]'
+`, { mode: 0o755 });
+  fs.mkdirSync(path.join(home, ".local"));
+  fs.symlinkSync(bin, path.join(home, ".local", "bin"));
+
+  client(["--agent", "x", "--dry-run"], home, {
+    ...CONFIG,
+    PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel",   // pragma: allowlist secret
+  });
+
+  const childEnv = fs.readFileSync(seen, "utf8");
+  for (const [k, v] of Object.entries(CONFIG)) {
+    assert.match(childEnv, new RegExp(`^${k}=${v}$`, "m"), `${k} must reach agentsview`);
+  }
+  assert.doesNotMatch(childEnv, /plow-token-that-must-not-travel/,  // pragma: allowlist secret
+    "and the token still must not");
+});
+
+test("a failed tag read fails the command", () => {
+  // Returning [] said "no tags are in use", which is a real answer to a
+  // different question, and --tags exited 0 having read nothing.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-tags-"));
+  const r = client(["--agent", "x", "--tags"], home,
+    { PLOW_AGENT_TOKEN: "plow-token", AGENT_INDEX_API: "http://127.0.0.1:1" }); // pragma: allowlist secret
+  assert.notEqual(r.code, 0, "a read that failed is not an empty list");
+  assert.match(r.out, /could not read tags/);
+  assert.match(r.out, /127\.0\.0\.1/, "says which host");
+  assert.doesNotMatch(r.out, /Traceback/);
+});
+
 
 test("a credential we cannot read is never deleted, and stops the run", () => {
   // Unreadable is unclassifiable, and the two wrong answers are opposites:
