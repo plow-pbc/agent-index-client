@@ -189,15 +189,16 @@ def purge_unusable_token(path=None):
         t = open(path).read().strip()
     except FileNotFoundError:
         return False                    # nothing there
-    except OSError:
-        # Unreadable is not a reason to leave it. Reading was only ever to find
-        # out whether we could USE it; a credential we cannot read is one we
-        # certainly cannot use, and it does not need to be read to be removed.
-        # Returning False here left a legacy token on disk while the run
-        # proceeded on the Plow token, which is the exact state this exists to
-        # prevent.
-        t = None
-    if t is not None and (not t or AGENT_KEY.match(t)):
+    except OSError as e:
+        # Unreadable is UNCLASSIFIABLE, and the two wrong answers are opposites:
+        # carrying on leaves a legacy credential on disk while we report past
+        # it, and deleting it signs out an install whose perfectly good key is
+        # merely unreadable this minute. So neither -- stop, and say what is
+        # wrong. A file we could not read is not a file we may delete.
+        sys.exit(f"  a stored credential at {path} could not be READ: {e}\n"
+                 f"  refusing to run: it cannot be classified, and deleting what we could "
+                 f"not read would sign out an install whose key is only unreadable")
+    if not t or AGENT_KEY.match(t):
         return False                    # a key we can still use, or nothing
     try:
         os.remove(path)
@@ -713,6 +714,14 @@ def main(argv):
         return
     if "--story" in argv:
         return publish_story(agent, argv)
+    # Decided BEFORE any work, not at the moment of sending. A run that
+    # collected nothing never reached auth_headers(), so an install with no
+    # credential at all read its stores, sent its best-effort pending request,
+    # and exited 0 -- reporting success for a machine that cannot report
+    # anything, hourly, forever. The README says a credential is required; here
+    # is where that becomes true. (After the flag checks above: a typo'd flag
+    # should be answered with the typo, not with a demand for a credential.)
+    auth_headers()
     days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 28
     payload = {"days": merge(from_agentsview(days), from_hermes(days))}
     total = sum(m[k] for d in payload["days"] for m in d["models"] for k in KEYS)
@@ -1079,6 +1088,7 @@ def self_check():
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
             env={**os.environ, "HERMES_HOME": empty_home, "HOME": empty_home,
+                 "PLOW_AGENT_TOKEN": "plow-token-for-this-check",
                  "AGENT_INDEX_API": "http://127.0.0.1:9"})
     assert "Traceback" not in quiet.stderr, \
         f"a quiet run must not crash, with or without a reachable server: {quiet.stderr[-300:]}"
@@ -1093,7 +1103,8 @@ def self_check():
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
             env={**os.environ, "HERMES_HOME": os.path.join(no_store, "nothing-here"),
-                 "HOME": no_store, "AGENT_INDEX_API": "http://127.0.0.1:9"})
+                 "HOME": no_store, "PLOW_AGENT_TOKEN": "plow-token-for-this-check",
+                 "AGENT_INDEX_API": "http://127.0.0.1:9"})
     out = gone.stdout + gone.stderr
     assert gone.returncode != 0, f"a configured store that is missing must fail: {out[-300:]}"
     assert "configured but missing" in out, out

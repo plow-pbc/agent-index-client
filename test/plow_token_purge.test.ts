@@ -202,28 +202,43 @@ echo '[]'
 });
 
 
-test("a stored credential we cannot read is removed, or the run stops", () => {
-  // Unreadable is not a reason to leave it: reading was only ever to find out
-  // whether we could use it, and a credential we cannot read is one we
-  // certainly cannot use. The old code caught the read error and carried on
-  // reporting with the Plow token while the legacy one sat there.
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-unreadable-"));
-  fs.mkdirSync(path.join(home, ".agent-index"));
-  const token = path.join(home, ".agent-index", "token");
-  fs.writeFileSync(token, "gho_cannotevenbereadanymore");  // pragma: allowlist secret
-  fs.chmodSync(token, 0o000);
-  try {
-    const r = client(["--agent", "x", "--dry-run"], home, { PLOW_AGENT_TOKEN: "plow-token" }); // pragma: allowlist secret
-    const stillThere = fs.existsSync(token);
-    if (stillThere) {
-      // Only acceptable outcome with the file present: the run refused to
-      // continue and said why.
-      assert.notEqual(r.code, 0, "it must not proceed with an unusable credential on disk");
-      assert.match(r.out, /could NOT be removed/);
-    } else {
-      assert.match(r.out, /removed a stored credential/);
+test("a credential we cannot read is never deleted, and stops the run", () => {
+  // Unreadable is unclassifiable, and the two wrong answers are opposites:
+  // carrying on leaves a legacy credential on disk while we report past it,
+  // and deleting it signs out an install whose perfectly good key happens to
+  // be unreadable this minute (a permissions change, an EIO). Neither: stop,
+  // and name the error.
+  for (const stored of ["gho_cannotevenbereadanymore", "aik_" + "k".repeat(43)]) {  // pragma: allowlist secret
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-unreadable-"));
+    fs.mkdirSync(path.join(home, ".agent-index"));
+    const token = path.join(home, ".agent-index", "token");
+    fs.writeFileSync(token, stored);
+    fs.chmodSync(token, 0o000);
+    try {
+      const r = client(["--agent", "x", "--dry-run"], home, { PLOW_AGENT_TOKEN: "plow-token" }); // pragma: allowlist secret
+      assert.notEqual(r.code, 0, "an unclassifiable credential must stop the run");
+      assert.match(r.out, /could not be READ/);
+      assert.ok(fs.existsSync(token), "and must NOT be deleted: it may be a key that still works");
+    } finally {
+      fs.chmodSync(token, 0o600);
     }
-  } finally {
-    if (fs.existsSync(token)) fs.chmodSync(token, 0o600);
   }
+});
+
+test("a run with no credential fails before it does any work", () => {
+  // A run that collected nothing never reached the credential check, so an
+  // install with none read its stores, sent a best-effort pending request and
+  // exited 0 -- success, hourly, from a machine that cannot report.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-nocred-"));
+  const r = client(["--agent", "x"], home, { PLOW_AGENT_TOKEN: undefined });
+  assert.notEqual(r.code, 0, "no credential is a failure, not a quiet success");
+  assert.match(r.out, /no PLOW_AGENT_TOKEN/);
+  assert.doesNotMatch(r.out, /agent=|days=/, "and it must fail before collecting anything");
+
+  // Reading the docs does not require a credential: the check sits after the
+  // flag handling, so a fresh install can find out what this thing wants
+  // before it has what it wants.
+  const help = client(["--help"], home, { PLOW_AGENT_TOKEN: undefined });
+  assert.equal(help.code, 0);
+  assert.doesNotMatch(help.out, /no PLOW_AGENT_TOKEN/);
 });
