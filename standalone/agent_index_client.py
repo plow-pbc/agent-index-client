@@ -52,8 +52,13 @@ def _api(url):
     # cleartext bearer to a stranger, past a check that said it never left the
     # machine. Nothing here has any use for credentials in a URL.
     if parts.username or parts.password or "@" in parts.netloc:
-        sys.exit(f"AGENT_INDEX_API must not carry credentials (got {url!r}) — "
-                 f"the host urllib connects to is not the one this looks like")
+        # The URL is NOT echoed: it holds the credential we are refusing, and
+        # this runs unattended under a supervisor whose log outlives the run.
+        # Naming the scheme and host is enough to fix a typo; printing the
+        # password would move it from one place we do not want it to another.
+        sys.exit(f"AGENT_INDEX_API must not carry credentials "
+                 f"(scheme={parts.scheme!r}, host={parts.hostname!r}) — the host urllib "
+                 f"connects to is not the one such a URL looks like")
     if parts.scheme == "https":
         return url
     if parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1", "::1"):
@@ -64,8 +69,11 @@ def _api(url):
         global LOOPBACK
         LOOPBACK = True
         return url
-    sys.exit(f"AGENT_INDEX_API must be https (got {url!r}) — the Plow token would "
-             f"travel in cleartext, and anyone on the path could then report as you")
+    # Same reason: scheme and host, never the whole URL. A path or query can
+    # carry a secret too, and this message lands in the same logs.
+    sys.exit(f"AGENT_INDEX_API must be https (scheme={parts.scheme!r}, host={parts.hostname!r}) — "
+             f"the Plow token would travel in cleartext, and anyone on the path "
+             f"could then report as you")
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app"))

@@ -128,6 +128,16 @@ test("the loopback exception bypasses the proxy it would otherwise leak through"
     { AGENT_INDEX_API: "http://localhost:80@attacker.example" });
   assert.notEqual(smuggled.code, 0, "userinfo must not get past the loopback check");
   assert.match(smuggled.out, /must not carry credentials/);
+  assert.doesNotMatch(smuggled.out, /attacker\.example.*localhost|localhost:80@/,
+    "the message must not echo the URL it is refusing");
+
+  // A password in a rejection message is a password in the supervisor log that
+  // outlives the run -- moved from one place we do not want it to another.
+  const secret = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+    { AGENT_INDEX_API: "https://someone:hunter2@index.example" }); // pragma: allowlist secret
+  assert.notEqual(secret.code, 0);
+  assert.doesNotMatch(secret.out, /hunter2/, "a refused credential must not be printed"); // pragma: allowlist secret
+  assert.match(secret.out, /index\.example/, "but say enough to fix the typo");
   assert.doesNotMatch(smuggled.out, /agentsview/, "and it must fail before any work is done");
 
   // Credentials in a URL have no use here at all, https included.
