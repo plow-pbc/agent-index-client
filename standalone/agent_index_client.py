@@ -656,6 +656,13 @@ def register(agent, argv):
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
+    code, key_out = _post(API + "/v1/keys", {"label": agent}, assertion)
+    if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
+        sys.exit(f"  could not mint report key: {code} {key_out}")
+    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+    with open(TOKEN_PATH, "w") as f:
+        f.write(key_out["key"])
+    os.chmod(TOKEN_PATH, 0o600)
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on
