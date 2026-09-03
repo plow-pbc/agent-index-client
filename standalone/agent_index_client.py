@@ -158,10 +158,24 @@ def auth_headers():
     return {"authorization": "Bearer " + token()}
 
 
+# Where a PLOW_AGENT_TOKEN comes from. TWO paths can be missing one -- a
+# report with nothing stored, and a registration -- and naming the variable
+# says what is absent, not what to do about it. There is deliberately no
+# GitHub sign-in left to fall back to, so the message has to carry the way
+# forward itself or the install has none.
+WHERE_TO_GET_A_TOKEN = (
+    "Inside a Plow container it is already there. Anywhere else, export the\n"
+    "one Plow minted for your agent — agent-mgr writes it to that agent's\n"
+    "own ~/.hermes-<agent>/.env, and a running container will print it:\n"
+    "  export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)")
+
+
 def index_assertion():
     plow = os.environ.get("PLOW_AGENT_TOKEN")
     if not plow:
-        sys.exit("no PLOW_AGENT_TOKEN in the environment")
+        # Not "and no stored key": registration deliberately refuses a key we
+        # issued ourselves, so whether one is on disk changes nothing here.
+        sys.exit("no PLOW_AGENT_TOKEN in the environment.\n" + WHERE_TO_GET_A_TOKEN)
     req = urllib.request.Request(PLOW_API + "/v1/auth/index-identity",
                                  headers={"authorization": "Bearer " + plow, "accept": "application/json"})
     try:
@@ -169,6 +183,13 @@ def index_assertion():
             assertion = json.loads(response.read() or b"{}").get("assertion")
     except urllib.error.HTTPError as exc:
         sys.exit(f"  could not get Plow assertion: {exc.code}")
+    except Exception as e:
+        # The same rule _post already follows: nothing leaves here as a
+        # traceback, because a traceback out of urllib carries the URL it was
+        # handed. Container boot -- the moment a fresh agent registers -- is
+        # exactly when Plow is least likely to be reachable, so this is the
+        # ORDINARY path, not an exotic one.
+        sys.exit(f"  could not reach {_shown(PLOW_API)}: {type(e).__name__}")
     if not isinstance(assertion, str):
         sys.exit("  Plow did not return an Index assertion")
     return {"authorization": "Bearer " + assertion}
@@ -249,10 +270,7 @@ def token(path=None):
         if AGENT_KEY.match(t):
             return t
     sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key.\n"
-             "Inside a Plow container it is already there. Anywhere else, export the\n"
-             "one Plow minted for your agent — agent-mgr writes it to that agent's\n"
-             "own ~/.hermes-<agent>/.env, and a running container will print it:\n"
-             "  export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)")
+             + WHERE_TO_GET_A_TOKEN)
 
 
 def from_agentsview(days):
