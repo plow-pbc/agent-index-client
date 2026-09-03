@@ -1151,11 +1151,11 @@ def self_check():
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
             env={**os.environ, "HERMES_HOME": os.path.join(no_store, "nothing-here"),
-                 "HOME": no_store, "PLOW_AGENT_TOKEN": "plow-token-for-this-check",
+                 "HOME": no_store,
                  "AGENT_INDEX_API": "http://127.0.0.1:9"})
     out = gone.stdout + gone.stderr
     assert gone.returncode != 0, f"a configured store that is missing must fail: {out[-300:]}"
-    assert "configured but missing" in out, out
+    assert "no PLOW_AGENT_TOKEN" in out, out
     assert "could not reach" not in out, f"and must not have posted: {out[-300:]}"
 
     assert _unknown_flags(["--oops"]) == ["--oops"], "a typo must be caught"
