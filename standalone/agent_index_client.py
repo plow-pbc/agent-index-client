@@ -16,8 +16,8 @@ Collects from two places, because neither alone covers a real machine:
     zero.
 
 Sends day x model token counts and nothing else: no prompts, no task titles,
-no file paths, no costs. Identity is the container's own Plow token, which the
-index resolves by asking Plow -- there is no sign-in and no second account.
+no file paths, no costs. Reports use the stored Index-issued key; the Plow
+token is used only once to exchange for an assertion during registration.
 """
 import datetime
 import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
@@ -64,6 +64,14 @@ def _api(url):
              "pointing them elsewhere is a code change, not an environment one.")
 
 
+def _plow_api(url):
+    if not url:
+        return "https://api.plow.co"
+    if url.startswith("https://") or LOOPBACK_ONLY.match(url):
+        return url
+    sys.exit("PLOW_API_BASE must be https or a bare loopback origin")
+
+
 def _shown(url):
     """A URL safe to print: scheme, host and port, nothing else.
 
@@ -85,9 +93,7 @@ def _shown(url):
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", ""))
-PLOW_API = "https://api.plow.co"
-if os.environ.get("PLOW_API_DEV_LOOPBACK") == "1":
-    PLOW_API = _api(os.environ.get("PLOW_API_BASE", ""))
+PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
 LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
@@ -148,15 +154,7 @@ def _post(url, body, headers):
 
 
 def auth_headers():
-    """The container's own Plow token, which is the only identity there is.
-
-    Every Plow container already carries PLOW_AGENT_TOKEN, and the index
-    resolves it to the person who owns the agent by asking Plow -- so a
-    container needs no sign-in of any kind, and there is no GitHub here.
-
-    A stored key still works for an install that has one, but nothing mints
-    new ones: minting required proving a GitHub identity, and that is gone.
-    """
+    """The stored report-only key; Plow tokens never report usage or stories."""
     return {"authorization": "Bearer " + token()}
 
 
@@ -666,7 +664,7 @@ def register(agent, argv):
         sys.exit(f"  registration failed: {code} {out}")
     code, key_out = _post(API + "/v1/keys", {"label": agent}, assertion)
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
-        sys.exit(f"  could not mint report key: {code} {key_out}")
+        sys.exit("  key mint returned an unexpected shape")
     save_key(key_out["key"])
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
