@@ -85,7 +85,9 @@ def _shown(url):
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", ""))
-PLOW_API = _api(os.environ.get("PLOW_API_BASE", "https://api.plow.co"))
+PLOW_API = "https://api.plow.co"
+if os.environ.get("PLOW_API_DEV_LOOPBACK") == "1":
+    PLOW_API = _api(os.environ.get("PLOW_API_BASE", ""))
 LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
@@ -155,9 +157,6 @@ def auth_headers():
     A stored key still works for an install that has one, but nothing mints
     new ones: minting required proving a GitHub identity, and that is gone.
     """
-    plow = os.environ.get("PLOW_AGENT_TOKEN")
-    if plow:
-        return {"authorization": "Bearer " + plow}
     return {"authorization": "Bearer " + token()}
 
 
@@ -175,6 +174,15 @@ def index_assertion():
     if not isinstance(assertion, str):
         sys.exit("  Plow did not return an Index assertion")
     return {"authorization": "Bearer " + assertion}
+
+
+def save_key(value):
+    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+    temp = TOKEN_PATH + ".new"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value)
+    os.replace(temp, TOKEN_PATH)
 
 
 # The one shape a stored credential may have: the index mints aik_ + 43
@@ -659,10 +667,7 @@ def register(agent, argv):
     code, key_out = _post(API + "/v1/keys", {"label": agent}, assertion)
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
         sys.exit(f"  could not mint report key: {code} {key_out}")
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    with open(TOKEN_PATH, "w") as f:
-        f.write(key_out["key"])
-    os.chmod(TOKEN_PATH, 0o600)
+    save_key(key_out["key"])
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on
