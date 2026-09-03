@@ -65,6 +65,12 @@ Plow can vouch for that token, and registration refuses a key the index issued
 itself — so a leaked key cannot claim an id, which is the one act an owner
 cannot undo.
 
+`--builder-name` credits **whoever built the agent**; `--owner-name` says what
+**you** are called in the usage ranking. They are the same person unless you say
+otherwise, so `--owner-name` defaults to `--builder-name` — pass it only when an
+agent credits somebody else, which is the one case a default cannot guess:
+guessing wrong renames a real person everywhere they appear.
+
 `--video` takes a YouTube **video id**, not a URL — the page embeds
 `youtube-nocookie.com/embed/<id>`.
 

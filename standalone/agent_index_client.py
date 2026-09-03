@@ -18,6 +18,10 @@ Collects from two places, because neither alone covers a real machine:
 Sends day x model token counts and nothing else: no prompts, no task titles,
 no file paths, no costs. Identity is the container's own Plow token, which the
 index resolves by asking Plow -- there is no sign-in and no second account.
+
+--builder-name credits whoever built the agent; --owner-name says what YOU are
+called on the leaderboard. They are the same person unless you say otherwise,
+so --owner-name defaults to --builder-name.
 """
 import datetime
 import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
@@ -623,6 +627,12 @@ def register(agent, argv):
     body = {k: v for k, v in {
         "name": opt("--name"), "blurb": opt("--blurb"), "repo": opt("--repo"),
         "runtime": opt("--runtime"), "builder_name": opt("--builder-name"),
+        # What YOU are called, as distinct from who built this agent. They are
+        # the same person almost always, so this defaults to --builder-name --
+        # but an agent can credit somebody else, and the index will not guess
+        # which: without this the ranking shows you as anonymous, and with the
+        # wrong value it would show you as them.
+        "owner_name": opt("--owner-name", opt("--builder-name")),
         "builder_handle": (opt("--builder-handle") or "").lstrip("@") or None,
     }.items() if v}
     if opt("--video"):
@@ -671,11 +681,11 @@ def publish_story(agent, argv):
 
 VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
                "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--builder-name", "--builder-handle"}
+               "--builder-name", "--builder-handle", "--owner-name"}
 KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
                "--title", "--body", "--tag", "--image", "--days", "--dry-run",
                "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--builder-name", "--builder-handle", "--help", "-h"}
+               "--builder-name", "--builder-handle", "--owner-name", "--help", "-h"}
 
 
 def _unknown_flags(argv):
@@ -1027,6 +1037,25 @@ def self_check():
         got = from_hermes(28, home=tmp, state_path=st)
         assert got[today]["gpt-5.5"]["input"] == 1, \
             f"and the run after it reports the delta, not the lifetime: {got}"
+
+    # --owner-name says what the PERSON is called; --builder-name credits
+    # whoever built the agent. Usually one person, occasionally not -- so the
+    # default is "you built it", and saying otherwise takes one more flag.
+    def registered(argv):
+        body = {}
+        def opt(flag, default=None):
+            return argv[argv.index(flag) + 1] if flag in argv else default
+        body["builder_name"] = opt("--builder-name")
+        body["owner_name"] = opt("--owner-name", opt("--builder-name"))
+        return body
+
+    assert registered(["--builder-name", "Daniel"]) == {"builder_name": "Daniel", "owner_name": "Daniel"}, \
+        "the common case: you built it, so it is your name"
+    assert registered(["--builder-name", "Paul Lucas", "--owner-name", "Daniel"]) == \
+        {"builder_name": "Paul Lucas", "owner_name": "Daniel"}, \
+        "crediting somebody else must not rename you"
+    assert registered(["--owner-name", "Daniel"]) == {"builder_name": None, "owner_name": "Daniel"}, \
+        "and you can say your name without crediting anyone"
 
     # --video takes a YouTube id because the page embeds
     # youtube-nocookie.com/embed/<id>; a URL there renders a broken player on a
