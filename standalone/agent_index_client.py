@@ -45,7 +45,12 @@ INDEX_ORIGIN = "https://agent-index-server.vercel.app"
 # loopback origin and nothing else. No path, no query, no userinfo, no remote
 # host -- so there is no URL policy left to get wrong, and nothing a traceback
 # could disclose that is not already on the developer's own machine.
-LOOPBACK_ONLY = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$")
+# The port range is part of the shape: urlsplit accepts ":99999" and then
+# RAISES when anything reads .port, including the redactor whose job is to make
+# printing safe. A validator that can make the error path throw is not one.
+LOOPBACK_ONLY = re.compile(
+    r"^http://(?:localhost|127\.0\.0\.1|\[::1\])"
+    r"(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}))?$")
 
 
 def _api(url):
@@ -66,9 +71,17 @@ def _shown(url):
     URL can carry a secret anywhere in it -- a path segment, a query parameter.
     Enough to fix a typo, not enough to leak one.
     """
-    parts = urllib.parse.urlsplit(url)
-    host = parts.hostname or "?"
-    return f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or "?"
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        # Total by construction. This is the function every error path calls to
+        # make a URL safe to print, so it must not be the thing that raises --
+        # a traceback out of here would carry the URL it was handed, which is
+        # the one outcome it exists to prevent.
+        return "?"
+    return f"{parts.scheme}://{host}{port}"
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", ""))

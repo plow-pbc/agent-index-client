@@ -128,6 +128,8 @@ test("reports can only go to the index, or to a bare loopback origin", () => {
     "http://127.0.0.1:3000/path?k=secret",         // a query to print           // pragma: allowlist secret
     "ftp://index.example",
     "https:///nohost",
+    "https://index.example:supersecrettoken",       // a secret smuggled as a port // pragma: allowlist secret
+    "http://127.0.0.1:99999",                       // a port urlsplit accepts and then raises on
   ]) {
     const r = run(bad);
     assert.notEqual(r.code, 0, `${bad} must be refused`);
@@ -135,9 +137,17 @@ test("reports can only go to the index, or to a bare loopback origin", () => {
     assert.doesNotMatch(r.out, /secret|hunter2/, "and never quoted back"); // pragma: allowlist secret
   }
 
+  const src = fs.readFileSync(CLIENT, "utf8");
+  // The redactor is total. It is what every error path calls to make a URL safe
+  // to print, so it must not be the thing that raises: urlsplit(...).port
+  // throws on an out-of-range port, and a traceback out of here would carry the
+  // URL it was handed.
+  const shownAt = src.indexOf("def _shown(");
+  const shown = src.slice(shownAt, src.indexOf("\n\n\n", shownAt));
+  assert.match(shown, /except ValueError/, "the redactor must not raise");
+
   // A loopback request still bypasses the environment proxy: HTTP_PROXY would
   // otherwise send it, and the bearer, to a remote proxy.
-  const src = fs.readFileSync(CLIENT, "utf8");
   const opener = src.slice(src.indexOf("def _open_no_redirect"), src.indexOf("def _post("));
   assert.match(opener, /ProxyHandler\(\{\}\)/);
   assert.match(opener, /LOOPBACK/);
