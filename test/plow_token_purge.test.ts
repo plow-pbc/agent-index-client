@@ -105,69 +105,42 @@ test("a host install registers on PLOW_AGENT_TOKEN alone, and is told where to g
   assert.match(ok.out, /could not reach|127\.0\.0\.1/);
 });
 
-test("the loopback exception bypasses the proxy it would otherwise leak through", () => {
-  // urllib reads HTTP_PROXY from the environment, so on a machine with a proxy
-  // set and loopback missing from NO_PROXY -- an ordinary corporate box -- the
-  // cleartext exception stopped meaning "never leaves the machine" and started
-  // meaning "goes to the proxy, with the bearer in it".
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-proxy-"));
-  const out = client(["--agent", "x", "--dry-run"], home, {
-    AGENT_INDEX_API: "http://127.0.0.1:1",
-    HTTP_PROXY: "http://proxy.invalid:3128",
-    http_proxy: "http://proxy.invalid:3128",
-    NO_PROXY: undefined,
-    no_proxy: undefined,
-  });
-  assert.doesNotMatch(out.out, /must be https/, "loopback is still allowed");
+test("reports can only go to the index, or to a bare loopback origin", () => {
+  // The origin is hard-coded. An environment override that could name any host
+  // needed a scheme check, a host check, userinfo, whitespace, a proxy bypass
+  // and a redactor for everything it might print -- and each of those was a
+  // separate hole. What is left is one shape: loopback, nothing else, so there
+  // is no path or query to leak and no remote host to reach.
+  const run = (api: string) =>
+    client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+      { AGENT_INDEX_API: api });
 
-  // The exact string from the review: a hand-rolled split reads the host as
-  // "localhost" while urllib -- the thing that opens the socket -- reads it as
-  // attacker.example with "localhost:80" as a username. The check said the
-  // token never left the machine; it would have gone to a stranger in the clear.
-  const smuggled = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-    { AGENT_INDEX_API: "http://localhost:80@attacker.example" });
-  assert.notEqual(smuggled.code, 0, "userinfo must not get past the loopback check");
-  assert.match(smuggled.out, /must not carry credentials/);
-  assert.doesNotMatch(smuggled.out, /attacker\.example.*localhost|localhost:80@/,
-    "the message must not echo the URL it is refusing");
-
-  // A password in a rejection message is a password in the supervisor log that
-  // outlives the run -- moved from one place we do not want it to another.
-  const secret = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-    { AGENT_INDEX_API: "https://someone:hunter2@index.example" }); // pragma: allowlist secret
-  assert.notEqual(secret.code, 0);
-  assert.doesNotMatch(secret.out, /hunter2/, "a refused credential must not be printed"); // pragma: allowlist secret
-  assert.match(secret.out, /index\.example/, "but say enough to fix the typo");
-  assert.doesNotMatch(smuggled.out, /agentsview/, "and it must fail before any work is done");
-
-  // Credentials in a URL have no use here at all, https included.
-  const overTls = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-    { AGENT_INDEX_API: "https://user:pass@index.example" });
-  assert.notEqual(overTls.code, 0);
-
-  // The real loopback forms still work, including IPv6.
-  for (const ok of ["http://127.0.0.1:3000", "http://localhost:8080", "http://[::1]:8000"]) {
-    const r = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-      { AGENT_INDEX_API: ok });
-    assert.doesNotMatch(r.out, /must be https|must not carry credentials/, `${ok} is loopback`);
+  for (const ok of ["http://127.0.0.1:3000", "http://localhost:8080", "http://[::1]:8000", ""]) {
+    assert.doesNotMatch(run(ok).out, /may only be a bare loopback origin/, `${ok} is allowed`);
   }
 
-  // Anything this prints lands in a supervisor log that outlives the run, and a
-  // URL can carry a secret anywhere in it -- not only in userinfo. An
-  // unreachable host is the path that prints one on an ordinary run.
-  const unreachable = client(["--register", "--agent", "x", "--name", "X"],
-    fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-    { AGENT_INDEX_API: "https://index.example/collect?k=supersecrettoken",  // pragma: allowlist secret
-      PLOW_AGENT_TOKEN: "plow-token" });                                    // pragma: allowlist secret
-  assert.doesNotMatch(unreachable.out, /supersecrettoken/,                  // pragma: allowlist secret
-    "a query parameter must not reach the log");
-  assert.doesNotMatch(unreachable.out, /\/collect/, "nor the path");
-  assert.match(unreachable.out, /index\.example/, "but say which host, so a typo is findable");
+  // Every shape that cost a fix while the override was general.
+  for (const bad of [
+    "https://index.example",                       // a remote host at all
+    "https://index.example/collect bad?k=secret",  // whitespace urllib refuses  // pragma: allowlist secret
+    "http://localhost:80@attacker.example",        // userinfo that reads as loopback
+    "https://someone:hunter2@index.example",       // credentials in a URL       // pragma: allowlist secret
+    "http://127.0.0.1:3000/path?k=secret",         // a query to print           // pragma: allowlist secret
+    "ftp://index.example",
+    "https:///nohost",
+  ]) {
+    const r = run(bad);
+    assert.notEqual(r.code, 0, `${bad} must be refused`);
+    assert.doesNotMatch(r.out, /Traceback/, "refused, not raised");
+    assert.doesNotMatch(r.out, /secret|hunter2/, "and never quoted back"); // pragma: allowlist secret
+  }
 
+  // A loopback request still bypasses the environment proxy: HTTP_PROXY would
+  // otherwise send it, and the bearer, to a remote proxy.
   const src = fs.readFileSync(CLIENT, "utf8");
   const opener = src.slice(src.indexOf("def _open_no_redirect"), src.indexOf("def _post("));
-  assert.match(opener, /ProxyHandler\(\{\}\)/, "loopback requests must disable the environment proxy");
-  assert.match(opener, /LOOPBACK/, "and only loopback: https keeps the default handlers");
+  assert.match(opener, /ProxyHandler\(\{\}\)/);
+  assert.match(opener, /LOOPBACK/);
 });
 
 test("the image ships the client this repo builds", () => {
@@ -211,32 +184,3 @@ echo '[]'
   assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
 });
 
-test("a URL urllib would choke on is refused before it can be printed", () => {
-  // A space in the path is accepted by urlsplit and rejected by http.client,
-  // which raises InvalidURL carrying the WHOLE url -- query string included --
-  // and an uncaught traceback prints it into a supervisor log. Refusing it in
-  // one place, up front, is what keeps every later path from having to be
-  // careful.
-  const bad = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-    { AGENT_INDEX_API: "https://index.example/collect bad?k=supersecret" }); // pragma: allowlist secret
-  assert.notEqual(bad.code, 0);
-  assert.match(bad.out, /spaces or control characters/);
-  assert.doesNotMatch(bad.out, /supersecret/, "the query must not reach the log"); // pragma: allowlist secret
-  assert.doesNotMatch(bad.out, /Traceback/, "and it must not arrive as a traceback");
-  assert.match(bad.out, /index\.example/, "but say which host");
-
-  // The other shapes urllib would accept and we should not.
-  for (const url of ["https:///nohost", "ftp://index.example", "https://index.example/a\tb"]) {
-    const r = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
-      { AGENT_INDEX_API: url });
-    assert.notEqual(r.code, 0, `${url} should be refused`);
-    assert.doesNotMatch(r.out, /Traceback/);
-  }
-
-  // Every failure path reports through the redactor, so none of them can print
-  // a raw URL even when something inside the stack hands one back.
-  const src = fs.readFileSync(CLIENT, "utf8");
-  for (const m of src.matchAll(/(?:print|sys\.exit|"error":)[^\n]*\{url[^\n]*/g)) {
-    assert.match(m[0], /_shown\(url\)/, `a raw URL is printed here: ${m[0].trim()}`);
-  }
-});

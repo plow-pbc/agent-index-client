@@ -125,7 +125,7 @@ anonymously.
 
 | Variable | Meaning |
 | --- | --- |
-| `AGENT_INDEX_API` | Server base URL. Defaults to the live one. |
+| `AGENT_INDEX_API` | A **bare loopback origin** for local development (`http://localhost:8787`), or unset. The published index is compiled in: where an agent's usage goes is a code change, not an environment one. |
 | `HERMES_HOME` | Hermes instance home holding `state.db`. Default `~/.hermes`. |
 | `AGENT_ID` | Used when `--agent` is not passed. |
 

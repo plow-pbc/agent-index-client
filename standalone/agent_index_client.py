@@ -20,7 +20,7 @@ no file paths, no costs. Identity is the container's own Plow token, which the
 index resolves by asking Plow -- there is no sign-in and no second account.
 """
 import datetime
-import json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 # Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
@@ -33,72 +33,46 @@ try:
 except AttributeError:          # Python < 3.7
     pass
 
-LOOPBACK = False
+# Where reports go. HARD-CODED, because the alternative kept costing security
+# fixes: an origin taken from the environment has to be checked for a scheme, a
+# host, userinfo, whitespace, a proxy that would see it, and a path or query
+# that must never be printed -- and each of those was a separate hole. Where an
+# agent's usage is published is not a runtime knob; changing it is a code change
+# somebody reviews.
+INDEX_ORIGIN = "https://agent-index-server.vercel.app"
+
+# The one override that remains, for developing against a local server: a bare
+# loopback origin and nothing else. No path, no query, no userinfo, no remote
+# host -- so there is no URL policy left to get wrong, and nothing a traceback
+# could disclose that is not already on the developer's own machine.
+LOOPBACK_ONLY = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$")
+
+
+def _api(url):
+    if not url:
+        return INDEX_ORIGIN
+    if LOOPBACK_ONLY.match(url):
+        return url
+    sys.exit("AGENT_INDEX_API may only be a bare loopback origin "
+             "(http://localhost:PORT, http://127.0.0.1:PORT, http://[::1]:PORT). "
+             "Reports go to the index this client was built to publish to; "
+             "pointing them elsewhere is a code change, not an environment one.")
+
 
 def _shown(url):
     """A URL safe to print: scheme, host and port, nothing else.
 
     Everything this prints goes to a supervisor log that outlives the run, and a
-    URL can carry a secret anywhere in it -- userinfo, a path segment, a query
-    parameter. Enough to fix a typo, not enough to leak one.
+    URL can carry a secret anywhere in it -- a path segment, a query parameter.
+    Enough to fix a typo, not enough to leak one.
     """
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname or "?"
     return f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
 
 
-
-
-def _api(url):
-    """Refuse to send the Plow token over cleartext http.
-
-    The bearer identifies its owner to Plow, so anyone on the path gets it and
-    can report as that person until it is rotated. Localhost is the exception,
-    and only localhost: that traffic never leaves the machine, and developing
-    against a local server is the reason this variable exists.
-    """
-    parts = urllib.parse.urlsplit(url)
-    # Strict, and in ONE place. Everything below assumes urllib will accept this
-    # URL; when it does not -- a space in the path, say -- http.client raises
-    # InvalidURL carrying the whole URL, and an uncaught traceback prints it,
-    # query string included, into a supervisor log. Anything urllib would refuse
-    # is refused here first, where it can be refused quietly.
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        sys.exit(f"AGENT_INDEX_API must be an http(s) URL with a host ({_shown(url)})")
-    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in url):
-        sys.exit(f"AGENT_INDEX_API must not contain spaces or control characters "
-                 f"({_shown(url)}) — urllib refuses such a URL by raising it back at us, "
-                 f"with everything it contains")
-    # Userinfo is refused outright, before anything looks at the host. Splitting
-    # the string by hand read "http://localhost:80@attacker.example" as
-    # localhost, while urllib -- the thing that actually opens the socket --
-    # reads the host as attacker.example and the rest as a username. That is a
-    # cleartext bearer to a stranger, past a check that said it never left the
-    # machine. Nothing here has any use for credentials in a URL.
-    if parts.username or parts.password or "@" in parts.netloc:
-        # The URL is NOT echoed: it holds the credential we are refusing, and
-        # this runs unattended under a supervisor whose log outlives the run.
-        # Naming the scheme and host is enough to fix a typo; printing the
-        # password would move it from one place we do not want it to another.
-        sys.exit(f"AGENT_INDEX_API must not carry credentials ({_shown(url)}) — "
-                 f"the host urllib connects to is not the one such a URL looks like")
-    if parts.scheme == "https":
-        return url
-    if parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1", "::1"):
-        # Only true with the proxy bypassed. urllib reads HTTP_PROXY from the
-        # environment, so on a machine with a proxy set and loopback missing
-        # from NO_PROXY -- a normal corporate box -- "it never leaves the
-        # machine" becomes "it goes to the proxy in cleartext, with the bearer".
-        global LOOPBACK
-        LOOPBACK = True
-        return url
-    # Same reason: scheme and host, never the whole URL. A path or query can
-    # carry a secret too, and this message lands in the same logs.
-    sys.exit(f"AGENT_INDEX_API must be https ({_shown(url)}) — the Plow token would "
-             f"travel in cleartext, and anyone on the path could then report as you")
-
-
-API = _api(os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app"))
+API = _api(os.environ.get("AGENT_INDEX_API", ""))
+LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
