@@ -45,10 +45,17 @@ const NO_PLOW = { PLOW_AGENT_TOKEN: undefined };
 // One flow, four situations. The distinction that matters is only ever
 // "was there a GitHub bearer on disk", NOT which credential the run was going
 // to use — the whole bug was a cleanup that ran on one path and not the other.
+const KEY = "aik_" + "k".repeat(43);   // the shape the index mints  // pragma: allowlist secret
 const CASES: Array<{ name: string; stored?: string; env: Record<string, string | undefined>; purged: boolean }> = [
   { name: "a container that has a Plow token and a leftover gho_", stored: "gho_leftoverfromtheoldsignin", env: PLOW, purged: true }, // pragma: allowlist secret
   { name: "a host with no Plow token and a leftover ghu_", stored: "ghu_anotherleftover", env: NO_PLOW, purged: true }, // pragma: allowlist secret
-  { name: "an install holding an aik_ key", stored: "aik_akeythisclientstilluses", env: NO_PLOW, purged: false }, // pragma: allowlist secret
+  // The namespaces a prefix blocklist missed. Each was treated as an Index key
+  // and sent as authorization to the index.
+  { name: "a github_pat_ token", stored: "github_pat_11ABCDE_abcdefghij", env: NO_PLOW, purged: true }, // pragma: allowlist secret
+  { name: "a ghs_ token", stored: "ghs_aserverkey", env: NO_PLOW, purged: true },   // pragma: allowlist secret
+  { name: "a ghr_ token", stored: "ghr_arefreshtoken", env: NO_PLOW, purged: true }, // pragma: allowlist secret
+  { name: "something else entirely", stored: "sk-or-a-note-to-self", env: NO_PLOW, purged: true }, // pragma: allowlist secret
+  { name: "an install holding an Index key", stored: KEY, env: NO_PLOW, purged: false },
   { name: "a fresh install with nothing stored", env: PLOW, purged: false },
 ];
 
@@ -59,9 +66,9 @@ for (const c of CASES) {
     const tokenFile = path.join(home, ".agent-index", "token");
     if (c.purged) {
       assert.ok(!fs.existsSync(tokenFile), "the GitHub token must not survive the run");
-      assert.match(out, /removed a leftover GitHub token/);
+      assert.match(out, /removed a stored credential/);
     } else {
-      assert.doesNotMatch(out, /removed a leftover/);
+      assert.doesNotMatch(out, /removed a stored credential/);
       if (c.stored !== undefined) {
         assert.equal(fs.readFileSync(tokenFile, "utf8"), c.stored, "only GitHub bearers are legacy");
       }
@@ -80,7 +87,7 @@ test("a purge that cannot finish stops the run", () => {
     const { code, out } = run(home, PLOW);
     assert.notEqual(code, 0, "the run must fail, not carry on");
     assert.match(out, /could NOT be removed/);
-    assert.doesNotMatch(out, /removed a leftover GitHub token/, "nothing may claim a removal that did not happen");
+    assert.doesNotMatch(out, /removed a stored credential/, "nothing may claim a removal that did not happen");
   } finally {
     fs.chmodSync(dir, 0o755);
   }

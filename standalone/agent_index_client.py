@@ -160,15 +160,19 @@ def auth_headers():
     return {"authorization": "Bearer " + token()}
 
 
-# What a stored credential may look like now. A gho_/ghu_/ghp_ value is a
-# GitHub bearer from before this client dropped GitHub; there is nothing left
-# that can exchange it, and sending it as Plow auth would hand a GitHub token
-# to a service that never had one -- so it is removed rather than used.
-GITHUB_PREFIXES = ("gho_", "ghu_", "ghp_")
+# The one shape a stored credential may have: the index mints aik_ + 43
+# url-safe characters and nothing else issues one.
+#
+# An ALLOWLIST. The blocklist this replaces named gho_, ghu_ and ghp_ -- GitHub
+# also has ghs_, ghr_ and github_pat_, and anything it did not name was treated
+# as an Index key and sent as authorization. Naming the one shape we accept
+# cannot be short of a namespace nobody thought of, and the file has held
+# exactly two kinds of thing in its life.
+AGENT_KEY = re.compile(r"^aik_[A-Za-z0-9_-]{20,128}$")
 
 
-def purge_legacy_github_token(path=None):
-    """Delete a stored GitHub bearer, wherever this run happens to be going.
+def purge_unusable_token(path=None):
+    """Delete a stored credential this client cannot use, whatever it is.
 
     Deleted, not ignored: leaving it on disk leaves a live GitHub credential in
     a file whose whole point was to stop holding one. It has to happen on
@@ -185,8 +189,8 @@ def purge_legacy_github_token(path=None):
         t = open(path).read().strip()
     except OSError:
         return False                    # absent, or not ours to read
-    if not t.startswith(GITHUB_PREFIXES):
-        return False
+    if not t or AGENT_KEY.match(t):
+        return False                    # a key we can still use, or nothing
     try:
         os.remove(path)
     except OSError as e:
@@ -195,10 +199,11 @@ def purge_legacy_github_token(path=None):
         # it is gone -- and the next run would find it and fail the same way,
         # silently, forever. A read-only home is a five-second fix once someone
         # is told; nothing tells them if we report normally.
-        sys.exit(f"  a leftover GitHub token at {path} could NOT be removed: {e}\n"
+        sys.exit(f"  an unusable stored credential at {path} could NOT be removed: {e}\n"
                  f"  refusing to run while it is still there — delete it, or make "
                  f"{os.path.dirname(path)} writable")
-    print("  removed a leftover GitHub token; this client no longer uses one")
+    print("  removed a stored credential this client cannot use "
+          "(only an Index key, aik_..., is accepted)")
     return True
 
 
@@ -206,10 +211,10 @@ def token(path=None):
     path = path or TOKEN_PATH
     if os.path.exists(path):
         t = open(path).read().strip()
-        # A GitHub value cannot get past startup's purge, so reaching here with
-        # one means the delete failed. Refuse it either way: sending it as Plow
-        # auth would hand a GitHub token to a service that never wanted one.
-        if t and not t.startswith(GITHUB_PREFIXES):
+        # Nothing that is not an Index key may be sent as authorization. A
+        # value that is not one cannot get past startup's purge, so reaching
+        # here with one means the delete failed -- and it is refused either way.
+        if AGENT_KEY.match(t):
             return t
     sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key.\n"
              "Inside a Plow container it is already there. Anywhere else, export the\n"
@@ -617,9 +622,8 @@ def publish_story(agent, argv):
     title = opt("--title")
     if not story_id or not title:
         sys.exit("--story ID and --title TEXT are both required")
+    # Truncated, not rejected: the check that used to follow could never fire.
     chosen = [argv[i + 1] for i, a in enumerate(argv) if a == "--tag"][:3]
-    if len(chosen) > 3:
-        sys.exit("at most 3 tags")
     body = {
         "story_id": story_id, "title": title, "body": opt("--body", ""),
         "tags": chosen,
@@ -679,7 +683,7 @@ def main(argv):
     # first deleted the token off the machine of whoever ran the tests.
     if "--self-check" in argv:
         return self_check()
-    purge_legacy_github_token()
+    purge_unusable_token()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
         sys.exit(__doc__)
@@ -697,11 +701,16 @@ def main(argv):
     for f in FAILURES:
         print(f"  COLLECTOR FAILED — {f}")
     print(f"  agent={agent} days={len(payload['days'])} tokens={total:,}")
+    if FAILURES:
+        # ANY collector failing stops the report, not just all of them. The
+        # server replaces a (day, model) total with what we send, so posting
+        # what the surviving collectors saw overwrites a correct number with a
+        # smaller one -- an agent that reads as having done less work than it
+        # did, which is worse than one that reads as not having reported. Exit
+        # non-zero so a supervisor notices; the next run reports the lot.
+        sys.exit("  a collector failed — NOT reporting a partial total, "
+                 "which would replace correct numbers with smaller ones")
     if not payload["days"]:
-        if FAILURES:
-            # Reporting nothing here would publish "idle" for an agent we simply
-            # failed to read. Exit non-zero so a supervisor notices.
-            sys.exit("  every collector failed and nothing was collected — NOT reporting")
         print("  nothing collected — check HERMES_HOME and that agentsview is installed")
     if "--dry-run" in argv:
         return print(json.dumps(payload, indent=1)[:2000])
@@ -991,6 +1000,38 @@ def self_check():
                 f"a video URL must be refused before it is sent: {bad} -> {r.stdout+r.stderr}"
             assert "registration failed" not in r.stdout, \
                 "the arguments must be checked before anything is sent"
+
+    # A collector that FAILED stops the report, even when another collector
+    # produced numbers. The server replaces a (day, model) total with what it is
+    # sent, so a Hermes-only merge posted while agentsview was broken overwrites
+    # a correct total with a smaller one -- the agent then reads as having done
+    # less work than it did, which is worse than a gap.
+    with tempfile.TemporaryDirectory() as partial:
+        c5 = make_store(partial, rows=[("s", "gpt-5.5", 5, 5, 0, 0, time.time(), time.time())])
+        st5 = os.path.join(partial, ".agent-index-state.json")
+        from_hermes(28, home=partial, state_path=st5)          # baseline
+        c5.execute("UPDATE session_model_usage SET input_tokens = 25 WHERE session_id='s'")
+        c5.commit(); c5.close()
+
+        # An agentsview that is installed and broken -- the case that matters.
+        # Not installed is not a failure and must still report.
+        binpath = os.path.join(partial, ".local", "bin")
+        os.makedirs(binpath)
+        av = os.path.join(binpath, "agentsview")
+        with open(av, "w") as f:
+            f.write("#!/bin/sh\necho 'not json at all'\n")
+        os.chmod(av, 0o755)
+
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--agent", "x"],
+                           capture_output=True, text=True,
+                           env=dict(os.environ, HOME=partial, HERMES_HOME=partial,
+                                    PLOW_AGENT_TOKEN="plow-token-for-this-check",
+                                    AGENT_INDEX_API="http://127.0.0.1:9"))
+        out = r.stdout + r.stderr
+        assert r.returncode != 0, f"a failed collector must stop the run: {out}"
+        assert "NOT reporting a partial total" in out, out
+        # It never tried to post: the unreachable endpoint would have said so.
+        assert "could not reach" not in out, f"it must not have posted at all: {out}"
 
     # A Plow container carries its own token and needs no sign-in at all, and
     # it must be PREFERRED over any stored key: the key is a leftover from the
