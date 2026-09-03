@@ -16,8 +16,8 @@ Collects from two places, because neither alone covers a real machine:
     zero.
 
 Sends day x model token counts and nothing else: no prompts, no task titles,
-no file paths, no costs. Identity is the container's own Plow token, which the
-index resolves by asking Plow -- there is no sign-in and no second account.
+no file paths, no costs. Reports use the stored Index-issued key; the Plow
+token is used only once to exchange for an assertion during registration.
 """
 import datetime
 import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
@@ -64,6 +64,14 @@ def _api(url):
              "pointing them elsewhere is a code change, not an environment one.")
 
 
+def _plow_api(url):
+    if not url:
+        return "https://api.plow.co"
+    if url.startswith("https://") or LOOPBACK_ONLY.match(url):
+        return url
+    sys.exit("PLOW_API_BASE must be https or a bare loopback origin")
+
+
 def _shown(url):
     """A URL safe to print: scheme, host and port, nothing else.
 
@@ -85,6 +93,7 @@ def _shown(url):
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", ""))
+PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
 LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
@@ -145,19 +154,54 @@ def _post(url, body, headers):
 
 
 def auth_headers():
-    """The container's own Plow token, which is the only identity there is.
-
-    Every Plow container already carries PLOW_AGENT_TOKEN, and the index
-    resolves it to the person who owns the agent by asking Plow -- so a
-    container needs no sign-in of any kind, and there is no GitHub here.
-
-    A stored key still works for an install that has one, but nothing mints
-    new ones: minting required proving a GitHub identity, and that is gone.
-    """
-    plow = os.environ.get("PLOW_AGENT_TOKEN")
-    if plow:
-        return {"authorization": "Bearer " + plow}
+    """The stored report-only key; Plow tokens never report usage or stories."""
     return {"authorization": "Bearer " + token()}
+
+
+# Where a PLOW_AGENT_TOKEN comes from. TWO paths can be missing one -- a
+# report with nothing stored, and a registration -- and naming the variable
+# says what is absent, not what to do about it. There is deliberately no
+# GitHub sign-in left to fall back to, so the message has to carry the way
+# forward itself or the install has none.
+WHERE_TO_GET_A_TOKEN = (
+    "Inside a Plow container it is already there. Anywhere else, export the\n"
+    "one Plow minted for your agent — agent-mgr writes it to that agent's\n"
+    "own ~/.hermes-<agent>/.env, and a running container will print it:\n"
+    "  export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)")
+
+
+def index_assertion():
+    plow = os.environ.get("PLOW_AGENT_TOKEN")
+    if not plow:
+        # Not "and no stored key": registration deliberately refuses a key we
+        # issued ourselves, so whether one is on disk changes nothing here.
+        sys.exit("no PLOW_AGENT_TOKEN in the environment.\n" + WHERE_TO_GET_A_TOKEN)
+    req = urllib.request.Request(PLOW_API + "/v1/auth/index-identity",
+                                 headers={"authorization": "Bearer " + plow, "accept": "application/json"})
+    try:
+        with _open_no_redirect(req) as response:
+            assertion = json.loads(response.read() or b"{}").get("assertion")
+    except urllib.error.HTTPError as exc:
+        sys.exit(f"  could not get Plow assertion: {exc.code}")
+    except Exception as e:
+        # The same rule _post already follows: nothing leaves here as a
+        # traceback, because a traceback out of urllib carries the URL it was
+        # handed. Container boot -- the moment a fresh agent registers -- is
+        # exactly when Plow is least likely to be reachable, so this is the
+        # ORDINARY path, not an exotic one.
+        sys.exit(f"  could not reach {_shown(PLOW_API)}: {type(e).__name__}")
+    if not isinstance(assertion, str):
+        sys.exit("  Plow did not return an Index assertion")
+    return {"authorization": "Bearer " + assertion}
+
+
+def save_key(value):
+    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+    temp = TOKEN_PATH + ".new"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value)
+    os.replace(temp, TOKEN_PATH)
 
 
 # The one shape a stored credential may have: the index mints aik_ + 43
@@ -226,10 +270,7 @@ def token(path=None):
         if AGENT_KEY.match(t):
             return t
     sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key.\n"
-             "Inside a Plow container it is already there. Anywhere else, export the\n"
-             "one Plow minted for your agent — agent-mgr writes it to that agent's\n"
-             "own ~/.hermes-<agent>/.env, and a running container will print it:\n"
-             "  export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)")
+             + WHERE_TO_GET_A_TOKEN)
 
 
 def from_agentsview(days):
@@ -622,8 +663,7 @@ def register(agent, argv):
         return argv[argv.index(flag) + 1] if flag in argv else default
     body = {k: v for k, v in {
         "name": opt("--name"), "blurb": opt("--blurb"), "repo": opt("--repo"),
-        "runtime": opt("--runtime"), "builder_name": opt("--builder-name"),
-        "builder_handle": (opt("--builder-handle") or "").lstrip("@") or None,
+        "runtime": opt("--runtime"),
     }.items() if v}
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
@@ -636,9 +676,14 @@ def register(agent, argv):
     if images:
         body["images"] = images
 
-    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, auth_headers())
+    assertion = index_assertion()
+    code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
+    code, key_out = _post(API + "/v1/keys", {"label": agent}, assertion)
+    if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
+        sys.exit("  key mint returned an unexpected shape")
+    save_key(key_out["key"])
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on
@@ -671,11 +716,11 @@ def publish_story(agent, argv):
 
 VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
                "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--builder-name", "--builder-handle"}
+               }
 KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
                "--title", "--body", "--tag", "--image", "--days", "--dry-run",
                "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--builder-name", "--builder-handle", "--help", "-h"}
+               "--help", "-h"}
 
 
 def _unknown_flags(argv):
@@ -1052,6 +1097,9 @@ def self_check():
     # a correct total with a smaller one -- the agent then reads as having done
     # less work than it did, which is worse than a gap.
     with tempfile.TemporaryDirectory() as partial:
+        os.makedirs(os.path.join(partial, ".agent-index"))
+        with open(os.path.join(partial, ".agent-index", "token"), "w") as f:
+            f.write("aik_" + "k" * 43)
         c5 = make_store(partial, rows=[("s", "gpt-5.5", 5, 5, 0, 0, time.time(), time.time())])
         st5 = os.path.join(partial, ".agent-index-state.json")
         from_hermes(28, home=partial, state_path=st5)          # baseline
@@ -1078,15 +1126,13 @@ def self_check():
         # It never tried to post: the unreachable endpoint would have said so.
         assert "could not reach" not in out, f"it must not have posted at all: {out}"
 
-    # A Plow container carries its own token and needs no sign-in at all, and
-    # it must be PREFERRED over any stored key: the key is a leftover from the
-    # GitHub era and nothing mints new ones.
-    os.environ["PLOW_AGENT_TOKEN"] = "plow_tok_selfcheck"
-    try:
-        h = auth_headers()
-        assert h["authorization"] == "Bearer plow_tok_selfcheck", h
-    finally:
-        del os.environ["PLOW_AGENT_TOKEN"]
+    # Reports use the stored report-only key; the Plow token is only for the
+    # one-time assertion exchange.
+    with tempfile.TemporaryDirectory() as key_home:
+        path = os.path.join(key_home, "token")
+        with open(path, "w") as f:
+            f.write("aik_" + "k" * 43)
+        assert token(path).startswith("aik_")
 
 
     # An unreachable server is a reported failure, not a traceback in a
@@ -1099,6 +1145,9 @@ def self_check():
     # is THERE and has nothing in it -- an agent that has not worked yet.
     with tempfile.TemporaryDirectory() as empty_home:
         make_store(empty_home).close()
+        os.makedirs(os.path.join(empty_home, ".agent-index"))
+        with open(os.path.join(empty_home, ".agent-index", "token"), "w") as f:
+            f.write("aik_" + "k" * 43)
         quiet = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
@@ -1118,11 +1167,11 @@ def self_check():
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
             env={**os.environ, "HERMES_HOME": os.path.join(no_store, "nothing-here"),
-                 "HOME": no_store, "PLOW_AGENT_TOKEN": "plow-token-for-this-check",
+                 "HOME": no_store,
                  "AGENT_INDEX_API": "http://127.0.0.1:9"})
     out = gone.stdout + gone.stderr
     assert gone.returncode != 0, f"a configured store that is missing must fail: {out[-300:]}"
-    assert "configured but missing" in out, out
+    assert "no PLOW_AGENT_TOKEN" in out, out
     assert "could not reach" not in out, f"and must not have posted: {out[-300:]}"
 
     assert _unknown_flags(["--oops"]) == ["--oops"], "a typo must be caught"

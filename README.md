@@ -45,9 +45,9 @@ images, repos and shared shells.
 An install from before this change may hold an Index-issued key (`aik_…`) at
 `~/.agent-index/token`, and that key still works — it is the credential those
 installs have, and dropping it would sign them out with nothing to replace it.
-Nothing mints new ones: minting required proving a GitHub identity, which is
-gone. A GitHub bearer left in that file is a different matter and is deleted on
-the next run rather than sent.
+A fresh install exchanges its Plow token for a short-lived assertion, then the
+Index mints its report-only key. A GitHub bearer left in that file is a
+different matter and is deleted on the next run rather than sent.
 
 ## Use
 
@@ -60,10 +60,9 @@ Register the agent once, then run it on a timer:
   --image https://example.com/shot.png
 ```
 
-`--register` claims the id using the container's own `PLOW_AGENT_TOKEN`. Only
-Plow can vouch for that token, and registration refuses a key the index issued
-itself — so a leaked key cannot claim an id, which is the one act an owner
-cannot undo.
+`--register` exchanges `PLOW_AGENT_TOKEN` for a short-lived Plow assertion and
+sends that assertion with the id and page content. No name or handle is typed:
+the Index resolves the creator from Plow.
 
 `--video` takes a YouTube **video id**, not a URL — the page embeds
 `youtube-nocookie.com/embed/<id>`.

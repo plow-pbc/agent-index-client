@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY } from "./fake-plow-index";
 
 // The standalone client is the copy that ships inside a container, so these
 // drive the real script rather than a re-implementation of it.
@@ -11,16 +12,41 @@ const CLIENT = path.join(__dirname, "..", "..", "standalone", "agent_index_clien
 
 /** Run the client in a throwaway HOME. Never reaches the network: --dry-run
  *  prints what it would send and returns before any POST. */
-function client(args: string[], home: string, env: Record<string, string | undefined> = {}) {
-  const base: NodeJS.ProcessEnv = { ...process.env, HOME: home, AGENT_INDEX_API: "http://127.0.0.1:1" };
+function childEnvFor(home: string, env: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  // PLOW_API_BASE defaults to a closed loopback port for the same reason
+  // AGENT_INDEX_API does: a test that forgets to set one must fail to connect,
+  // not reach the real api.plow.co with whatever token is lying around.
+  const base: NodeJS.ProcessEnv = {
+    ...process.env, HOME: home,
+    AGENT_INDEX_API: "http://127.0.0.1:1", PLOW_API_BASE: "http://127.0.0.1:1",
+  };
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) delete base[k]; else base[k] = v;
   }
+  return base;
+}
+
+function client(args: string[], home: string, env: Record<string, string | undefined> = {}) {
+  const base = childEnvFor(home, env);
   try {
     return { code: 0, out: execFileSync("python3", [CLIENT, ...args], { encoding: "utf8", env: base }) };
   } catch (e: any) {
     return { code: e.status ?? 1, out: String(e.stdout || "") + String(e.stderr || "") };
   }
+}
+
+/** Same run, asynchronously. The stand-in servers below are in THIS process,
+ *  and execFileSync blocks the event loop for the whole child lifetime -- so a
+ *  test that talks to them has to let the loop turn. */
+function clientAsync(args: string[], home: string, env: Record<string, string | undefined> = {}) {
+  return new Promise<{ code: number; out: string }>((resolve) => {
+    const child = spawn("python3", [CLIENT, ...args], { env: childEnvFor(home, env) });
+    let out = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.stderr.on("data", (c) => (out += c));
+    const timer = setTimeout(() => child.kill("SIGKILL"), 30000);
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, out }); });
+  });
 }
 
 // The two things a run can be: a report, or the registration a fresh install
@@ -38,6 +64,9 @@ function homeWith(token?: string) {
   }
   return home;
 }
+
+/** The path the client stores its minted Index key at, inside a test HOME. */
+const tokenPath = (home: string) => path.join(home, ".agent-index", "token");
 
 const PLOW = { PLOW_AGENT_TOKEN: "plow-token-for-this-container" }; // pragma: allowlist secret
 const NO_PLOW = { PLOW_AGENT_TOKEN: undefined };
@@ -106,10 +135,16 @@ test("a host install registers on PLOW_AGENT_TOKEN alone, and is told where to g
 
   // With the token exported it gets as far as the network, which is the proof
   // that the credential alone is the whole setup: the only thing left to fail
-  // is the unreachable API this test points at.
+  // is the unreachable API this test points at. That API is now PLOW, not the
+  // Index -- the exchange is the first hop -- and an unreachable Plow is the
+  // ORDINARY case at container boot, so it has to be a reported failure and
+  // never a traceback carrying the URL it was handed.
   const ok = register(homeWith(), PLOW);
+  assert.notEqual(ok.code, 0);
   assert.doesNotMatch(ok.out, /no PLOW_AGENT_TOKEN/, "an exported token is enough on any host");
-  assert.match(ok.out, /could not reach|127\.0\.0\.1/);
+  assert.doesNotMatch(ok.out, /Traceback/, "reported, not raised");
+  assert.match(ok.out, /could not reach.*127\.0\.0\.1/);
+  assert.doesNotMatch(ok.out, new RegExp(PLOW.PLOW_AGENT_TOKEN), "and never quotes the token back");
 });
 
 test("reports can only go to the index, or to a bare loopback origin", () => {
@@ -170,17 +205,28 @@ test("the image ships the client this repo builds", () => {
   assert.doesNotMatch(dockerfile, /COPY[^\n]*hermes_client\.py/, "and not the tokenmaxxing fork");
 });
 
+/** Install a stand-in agentsview in a home, running `body`.
+ *
+ *  Always, even where a test does not care what the collector says: the client
+ *  falls back to /opt/homebrew/bin and /usr/local/bin, which are ABSOLUTE, so
+ *  a machine with the real agentsview installed would run it and collect that
+ *  developer's own usage into the test.
+ */
+function stubAgentsView(home: string, body: string) {
+  const bin = path.join(home, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "agentsview"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  fs.mkdirSync(path.join(home, ".local"), { recursive: true });
+  fs.symlinkSync(bin, path.join(home, ".local", "bin"));   // where the client looks
+}
+
 /** A home with a stand-in agentsview that records the environment it was given.
  *  Both env tests need the same thing: an installed collector, a place for it
  *  to write what it saw, and a client run that invokes it. */
 function withFakeAgentsView() {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-av-"));
-  const bin = path.join(home, "bin");
-  fs.mkdirSync(bin);
+  const home = homeWith(KEY);   // a report needs a stored key BEFORE it collects
   const seen = path.join(home, "seen.txt");
-  fs.writeFileSync(path.join(bin, "agentsview"), `#!/bin/sh\nenv > ${seen}\necho '[]'\n`, { mode: 0o755 });
-  fs.mkdirSync(path.join(home, ".local"));
-  fs.symlinkSync(bin, path.join(home, ".local", "bin"));   // where the client looks
+  stubAgentsView(home, `env > ${seen}\necho '[]'`);
   return {
     home,
     /** Run a collection and return the environment the child actually received. */
@@ -282,4 +328,111 @@ test("a run with no credential fails before it does any work", () => {
   const help = client(["--help"], home, { PLOW_AGENT_TOKEN: undefined });
   assert.equal(help.code, 0);
   assert.doesNotMatch(help.out, /no PLOW_AGENT_TOKEN/);
+});
+
+
+// ---------------------------------------------------------------------------
+// The credential exchange, end to end, against stand-in Plow and Index servers.
+//
+// Every assertion above this line is about what the client REFUSES. These are
+// about what it does when everything works, which is the half that decides
+// whether the Plow token stays home: that is only observable from the far end,
+// so it needs servers rather than a dry run.
+// ---------------------------------------------------------------------------
+
+/** A home wired to the stand-ins, with a collector that finds nothing. */
+function bootstrapHome(s: { plow: string; index: string }) {
+  const home = homeWith();               // a fresh install: nothing stored
+  stubAgentsView(home, "echo '[]'");
+  return {
+    home,
+    env: {
+      PLOW_AGENT_TOKEN: PLOW_TOKEN,
+      PLOW_API_BASE: s.plow,
+      AGENT_INDEX_API: s.index,
+      HERMES_HOME: undefined,            // guess, do not fail: an absent store
+    } as Record<string, string | undefined>,                // nobody named is not an error
+  };
+}
+
+test("registration trades the Plow token for an assertion, and stores what the Index mints", async () => {
+  const s = await standIns();
+  try {
+    const { home, env } = bootstrapHome(s);
+    const r = await clientAsync(["--register", "--agent", "purge-test", "--name", "Purge Test"], home, env);
+    assert.equal(r.code, 0, r.out);
+
+    // Plow is asked once, with the container's own token. That is the only
+    // place that token is ever allowed to go.
+    assert.deepEqual(s.plowHits.map((h) => `${h.method} ${h.path}`),
+      ["GET /v1/auth/index-identity"], "one exchange, on the identity route");
+    assert.equal(s.plowHits[0].bearer, `Bearer ${PLOW_TOKEN}`);
+
+    // The Index is shown the assertion and NOTHING else. Both halves matter:
+    // the stand-in 401s a Plow token, so a leak fails the run, and this also
+    // catches one smuggled somewhere a 401 would not look.
+    assert.deepEqual(s.indexHits.map((h) => `${h.method} ${h.path}`),
+      ["POST /v1/agents", "POST /v1/keys"], "register, then mint");
+    for (const h of s.indexHits) {
+      assert.equal(h.bearer, `Bearer ${ASSERTION}`, `${h.path} must carry the assertion`);
+    }
+    assert.doesNotMatch(s.indexSaw(), new RegExp(PLOW_TOKEN),
+      "the Plow token must never reach the Index");
+
+    // What lands on disk is the minted key, privately, by rename: a reader
+    // that opens the file mid-write must never see a half-written credential.
+    assert.equal(fs.readFileSync(tokenPath(home), "utf8"), MINTED_KEY);
+    assert.equal(fs.statSync(tokenPath(home)).mode & 0o777, 0o600, "the key is not world-readable");
+    assert.ok(!fs.existsSync(tokenPath(home) + ".new"), "no temp file survives the write");
+  } finally {
+    await s.close();
+  }
+});
+
+test("every later report carries the stored key alone, and never goes back to Plow", async () => {
+  const s = await standIns();
+  try {
+    const { home, env } = bootstrapHome(s);
+    const boot = await clientAsync(["--register", "--agent", "purge-test"], home, env);
+    assert.equal(boot.code, 0, boot.out);
+    const plowCallsAfterBootstrap = s.plowHits.length;
+
+    const r = await clientAsync(["--agent", "purge-test"], home, env);
+    assert.equal(r.code, 0, r.out);
+
+    // The stand-in 401s anything but the minted key on a report route, so this
+    // failing is the flow being wrong rather than an assertion being stale.
+    const reports = s.indexHits.filter((h) => h.path === "/v1/usage");
+    assert.equal(reports.length, 1, `exactly one report: ${r.out}`);
+    assert.equal(reports[0].bearer, `Bearer ${MINTED_KEY}`,
+      "reports are authorised by the key the Index issued");
+
+    // The token is still exported -- a container never stops carrying it --
+    // and is still not used, which is the whole point of storing a key.
+    assert.equal(s.plowHits.length, plowCallsAfterBootstrap,
+      "the exchange happens at bootstrap and never again");
+  } finally {
+    await s.close();
+  }
+});
+
+test("a report prefers the stored key even while a Plow token is exported", async () => {
+  // The ordering inside auth_headers(). With both present the Plow token is
+  // the tempting one -- it is the credential the container was given -- and
+  // sending it would authorise reports with a token the Index cannot scope.
+  const s = await standIns();
+  try {
+    const home = homeWith(MINTED_KEY);       // already bootstrapped
+    stubAgentsView(home, "echo '[]'");
+    const r = await clientAsync(["--agent", "purge-test"], home, {
+      PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow,
+      AGENT_INDEX_API: s.index, HERMES_HOME: undefined,
+    });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(s.plowHits.length, 0, "a stored key needs no exchange");
+    assert.doesNotMatch(s.indexSaw(), new RegExp(PLOW_TOKEN));
+    assert.ok(s.indexHits.length > 0, "the report must actually have been sent");
+  } finally {
+    await s.close();
+  }
 });
