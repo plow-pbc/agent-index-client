@@ -201,3 +201,29 @@ echo '[]'
   assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
 });
 
+
+test("a stored credential we cannot read is removed, or the run stops", () => {
+  // Unreadable is not a reason to leave it: reading was only ever to find out
+  // whether we could use it, and a credential we cannot read is one we
+  // certainly cannot use. The old code caught the read error and carried on
+  // reporting with the Plow token while the legacy one sat there.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-unreadable-"));
+  fs.mkdirSync(path.join(home, ".agent-index"));
+  const token = path.join(home, ".agent-index", "token");
+  fs.writeFileSync(token, "gho_cannotevenbereadanymore");  // pragma: allowlist secret
+  fs.chmodSync(token, 0o000);
+  try {
+    const r = client(["--agent", "x", "--dry-run"], home, { PLOW_AGENT_TOKEN: "plow-token" }); // pragma: allowlist secret
+    const stillThere = fs.existsSync(token);
+    if (stillThere) {
+      // Only acceptable outcome with the file present: the run refused to
+      // continue and said why.
+      assert.notEqual(r.code, 0, "it must not proceed with an unusable credential on disk");
+      assert.match(r.out, /could NOT be removed/);
+    } else {
+      assert.match(r.out, /removed a stored credential/);
+    }
+  } finally {
+    if (fs.existsSync(token)) fs.chmodSync(token, 0o600);
+  }
+});

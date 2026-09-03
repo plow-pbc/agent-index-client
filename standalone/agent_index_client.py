@@ -187,9 +187,17 @@ def purge_unusable_token(path=None):
     path = path or TOKEN_PATH
     try:
         t = open(path).read().strip()
+    except FileNotFoundError:
+        return False                    # nothing there
     except OSError:
-        return False                    # absent, or not ours to read
-    if not t or AGENT_KEY.match(t):
+        # Unreadable is not a reason to leave it. Reading was only ever to find
+        # out whether we could USE it; a credential we cannot read is one we
+        # certainly cannot use, and it does not need to be read to be removed.
+        # Returning False here left a legacy token on disk while the run
+        # proceeded on the Plow token, which is the exact state this exists to
+        # prevent.
+        t = None
+    if t is not None and (not t or AGENT_KEY.match(t)):
         return False                    # a key we can still use, or nothing
     try:
         os.remove(path)
