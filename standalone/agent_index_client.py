@@ -58,6 +58,17 @@ def _api(url):
     against a local server is the reason this variable exists.
     """
     parts = urllib.parse.urlsplit(url)
+    # Strict, and in ONE place. Everything below assumes urllib will accept this
+    # URL; when it does not -- a space in the path, say -- http.client raises
+    # InvalidURL carrying the whole URL, and an uncaught traceback prints it,
+    # query string included, into a supervisor log. Anything urllib would refuse
+    # is refused here first, where it can be refused quietly.
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        sys.exit(f"AGENT_INDEX_API must be an http(s) URL with a host ({_shown(url)})")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in url):
+        sys.exit(f"AGENT_INDEX_API must not contain spaces or control characters "
+                 f"({_shown(url)}) — urllib refuses such a URL by raising it back at us, "
+                 f"with everything it contains")
     # Userinfo is refused outright, before anything looks at the host. Splitting
     # the string by hand read "http://localhost:80@attacker.example" as
     # localhost, while urllib -- the thing that actually opens the socket --
@@ -137,6 +148,12 @@ def _post(url, body, headers):
         # Scheme and host only: the path and query of a report URL carry an
         # agent id, and any URL can carry more than that.
         return 0, {"error": f"could not reach {_shown(url)}: {e.reason}"}
+    except Exception as e:
+        # Nothing may leave this function as a traceback. An exception raised
+        # from inside the stack often carries the URL it was handed -- and the
+        # URL is the one thing we have decided must not be printed. The TYPE is
+        # what a reader needs; the value it wrapped is not.
+        return 0, {"error": f"request to {_shown(url)} failed: {type(e).__name__}"}
 
 
 
@@ -556,9 +573,15 @@ def tags():
     and "Order returns" would split one bar in two and nothing would line up
     across agents.
     """
-    req = urllib.request.Request(f"{API}/v1/tags", headers={"accept": "application/json"})
-    with _open_no_redirect(req) as r:
-        return json.loads(r.read()).get("tags", [])
+    url = f"{API}/v1/tags"
+    req = urllib.request.Request(url, headers={"accept": "application/json"})
+    try:
+        with _open_no_redirect(req) as r:
+            return json.loads(r.read()).get("tags", [])
+    except Exception as e:
+        # Same rule as _post: the failure is reported, the URL is not.
+        print(f"  could not read tags from {_shown(url)}: {type(e).__name__}")
+        return []
 
 
 def register(agent, argv):

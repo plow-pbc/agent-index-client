@@ -210,3 +210,33 @@ echo '[]'
     "an allowlist, so a secret we have not thought of yet is also withheld");
   assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
 });
+
+test("a URL urllib would choke on is refused before it can be printed", () => {
+  // A space in the path is accepted by urlsplit and rejected by http.client,
+  // which raises InvalidURL carrying the WHOLE url -- query string included --
+  // and an uncaught traceback prints it into a supervisor log. Refusing it in
+  // one place, up front, is what keeps every later path from having to be
+  // careful.
+  const bad = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+    { AGENT_INDEX_API: "https://index.example/collect bad?k=supersecret" }); // pragma: allowlist secret
+  assert.notEqual(bad.code, 0);
+  assert.match(bad.out, /spaces or control characters/);
+  assert.doesNotMatch(bad.out, /supersecret/, "the query must not reach the log"); // pragma: allowlist secret
+  assert.doesNotMatch(bad.out, /Traceback/, "and it must not arrive as a traceback");
+  assert.match(bad.out, /index\.example/, "but say which host");
+
+  // The other shapes urllib would accept and we should not.
+  for (const url of ["https:///nohost", "ftp://index.example", "https://index.example/a\tb"]) {
+    const r = client(["--agent", "x", "--dry-run"], fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+      { AGENT_INDEX_API: url });
+    assert.notEqual(r.code, 0, `${url} should be refused`);
+    assert.doesNotMatch(r.out, /Traceback/);
+  }
+
+  // Every failure path reports through the redactor, so none of them can print
+  // a raw URL even when something inside the stack hands one back.
+  const src = fs.readFileSync(CLIENT, "utf8");
+  for (const m of src.matchAll(/(?:print|sys\.exit|"error":)[^\n]*\{url[^\n]*/g)) {
+    assert.match(m[0], /_shown\(url\)/, `a raw URL is printed here: ${m[0].trim()}`);
+  }
+});
