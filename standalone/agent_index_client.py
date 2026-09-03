@@ -765,13 +765,10 @@ def self_check():
     gpt = [x for x in m[1]["models"] if x["model"] == "gpt"][0]
     assert gpt == {"model": "gpt", "input": 11, "output": 2, "cache_read": 5, "cache_write": 0}, gpt
     assert merge({}, {}) == [], "no data must send no days, not a day of zeros"
-    # A store somebody NAMED and that is not there is a failure, not silence:
-    # reported as silence, an agentsview-only payload posts and replaces this
-    # agent's totals with numbers that leave Hermes out.
-    before = len(FAILURES)
-    assert from_hermes(28, home="/nonexistent") == {}, "a missing store is empty, not a crash"
-    assert len(FAILURES) == before + 1, "a configured store that is absent must be a FAILURE"
-    FAILURES.pop()
+    # A store somebody NAMED and that is not there is a failure, not silence.
+    # Asserted end to end further down -- running the client proves the whole
+    # consequence (non-zero exit, nothing posted), where poking FAILURES only
+    # proved the flag, and left the list dirty for whatever ran next.
 
     # The counters are CUMULATIVE per session, so the collector diffs against a
     # snapshot rather than dating them by a column. These assertions pin the
