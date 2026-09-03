@@ -152,6 +152,18 @@ test("the loopback exception bypasses the proxy it would otherwise leak through"
     assert.doesNotMatch(r.out, /must be https|must not carry credentials/, `${ok} is loopback`);
   }
 
+  // Anything this prints lands in a supervisor log that outlives the run, and a
+  // URL can carry a secret anywhere in it -- not only in userinfo. An
+  // unreachable host is the path that prints one on an ordinary run.
+  const unreachable = client(["--register", "--agent", "x", "--name", "X"],
+    fs.mkdtempSync(path.join(os.tmpdir(), "aic-")),
+    { AGENT_INDEX_API: "https://index.example/collect?k=supersecrettoken",  // pragma: allowlist secret
+      PLOW_AGENT_TOKEN: "plow-token" });                                    // pragma: allowlist secret
+  assert.doesNotMatch(unreachable.out, /supersecrettoken/,                  // pragma: allowlist secret
+    "a query parameter must not reach the log");
+  assert.doesNotMatch(unreachable.out, /\/collect/, "nor the path");
+  assert.match(unreachable.out, /index\.example/, "but say which host, so a typo is findable");
+
   const src = fs.readFileSync(CLIENT, "utf8");
   const opener = src.slice(src.indexOf("def _open_no_redirect"), src.indexOf("def _post("));
   assert.match(opener, /ProxyHandler\(\{\}\)/, "loopback requests must disable the environment proxy");

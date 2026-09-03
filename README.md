@@ -37,10 +37,17 @@ token Plow minted for that agent. `agent-mgr` writes it to the agent's own
 export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)
 ```
 
-It is the same credential either way, and it is the only one this client
-accepts: there is no sign-in, no device code, and no account to create. The
-token is scoped to one agent, so treat it as that agent's identity and keep it
-out of images, repos and shared shells.
+It is the same credential either way, and it is the only one a new install can
+get: there is no sign-in, no device code, and no account to create. The token is
+scoped to one agent, so treat it as that agent's identity and keep it out of
+images, repos and shared shells.
+
+An install from before this change may hold an Index-issued key (`aik_…`) at
+`~/.agent-index/token`, and that key still works — it is the credential those
+installs have, and dropping it would sign them out with nothing to replace it.
+Nothing mints new ones: minting required proving a GitHub identity, which is
+gone. A GitHub bearer left in that file is a different matter and is deleted on
+the next run rather than sent.
 
 ## Use
 

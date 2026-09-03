@@ -35,6 +35,19 @@ except AttributeError:          # Python < 3.7
 
 LOOPBACK = False
 
+def _shown(url):
+    """A URL safe to print: scheme, host and port, nothing else.
+
+    Everything this prints goes to a supervisor log that outlives the run, and a
+    URL can carry a secret anywhere in it -- userinfo, a path segment, a query
+    parameter. Enough to fix a typo, not enough to leak one.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or "?"
+    return f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
+
+
+
 
 def _api(url):
     """Refuse to send the Plow token over cleartext http.
@@ -56,9 +69,8 @@ def _api(url):
         # this runs unattended under a supervisor whose log outlives the run.
         # Naming the scheme and host is enough to fix a typo; printing the
         # password would move it from one place we do not want it to another.
-        sys.exit(f"AGENT_INDEX_API must not carry credentials "
-                 f"(scheme={parts.scheme!r}, host={parts.hostname!r}) — the host urllib "
-                 f"connects to is not the one such a URL looks like")
+        sys.exit(f"AGENT_INDEX_API must not carry credentials ({_shown(url)}) — "
+                 f"the host urllib connects to is not the one such a URL looks like")
     if parts.scheme == "https":
         return url
     if parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1", "::1"):
@@ -71,9 +83,8 @@ def _api(url):
         return url
     # Same reason: scheme and host, never the whole URL. A path or query can
     # carry a secret too, and this message lands in the same logs.
-    sys.exit(f"AGENT_INDEX_API must be https (scheme={parts.scheme!r}, host={parts.hostname!r}) — "
-             f"the Plow token would travel in cleartext, and anyone on the path "
-             f"could then report as you")
+    sys.exit(f"AGENT_INDEX_API must be https ({_shown(url)}) — the Plow token would "
+             f"travel in cleartext, and anyone on the path could then report as you")
 
 
 API = _api(os.environ.get("AGENT_INDEX_API", "https://agent-index-server.vercel.app"))
@@ -123,7 +134,9 @@ def _post(url, body, headers):
         # This ran as an unhandled traceback in a supervised loop's logs; a
         # status of 0 reports the same failure without the noise, and callers
         # already treat anything other than 200 as a failure.
-        return 0, {"error": f"could not reach {url}: {e.reason}"}
+        # Scheme and host only: the path and query of a report URL carry an
+        # agent id, and any URL can carry more than that.
+        return 0, {"error": f"could not reach {_shown(url)}: {e.reason}"}
 
 
 
@@ -317,7 +330,12 @@ def from_hermes(days, home=None, state_path=None):
         # describes. A misconfigured HERMES_HOME points at a directory with no
         # state.db, and moving the only ledger there -- then deleting the
         # original -- loses it for the correctly configured run that follows.
-        if (os.path.exists(db) and not os.path.exists(state_path)
+        # _has_usage_table, not os.path.exists: a state.db belonging to something
+        # else passes an existence check, and the ledger would be moved and the
+        # original deleted before the missing table is ever discovered. The
+        # resolver above already prefers a store that carries the table; this
+        # refuses to migrate when it had to fall back to one that does not.
+        if (_has_usage_table(db) and not os.path.exists(state_path)
                 and os.path.exists(STATE_PATH)):
             # An install that predates this move already has a ledger. Carrying
             # it over is the whole point: leaving it behind would cause exactly
@@ -858,6 +876,26 @@ def self_check():
                     "the right home adopts it"
             finally:
                 STATE_PATH = was
+
+            # A state.db belonging to something ELSE is not a Hermes store.
+            # It passes an existence check, so the ledger was moved and the
+            # original deleted before the missing table was ever discovered.
+            os.remove(beside)
+            impostor = tempfile.mkdtemp()
+            sqlite3.connect(os.path.join(impostor, "state.db")).close()   # no usage table
+            other_home = tempfile.mkdtemp()
+            os.makedirs(os.path.join(other_home, ".agent-index"))
+            other = os.path.join(other_home, ".agent-index", "hermes-state.json")
+            _save_state(other, {"version": 1, "snapshot": {"z": [3, 3, 3, 3]}, "daily": {}})
+            was, STATE_PATH = STATE_PATH, other
+            try:
+                from_hermes(28, home=impostor)
+                assert os.path.exists(other), \
+                    "a database with no usage table must not consume the ledger"
+                assert not os.path.exists(os.path.join(impostor, ".agent-index-state.json"))
+            finally:
+                STATE_PATH = was
+            from_hermes(28, home=moved)          # put the ledger back for the next case
 
             # A CORRUPT legacy ledger is still evidence that this install has
             # been reporting. Recognising it and then dropping it left the
