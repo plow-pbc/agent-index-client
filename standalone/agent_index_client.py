@@ -224,7 +224,7 @@ def from_agentsview(days):
         return {}
     try:
         raw = subprocess.run([exe, "usage", "daily", "--json"], capture_output=True,
-                             text=True, timeout=120).stdout
+                             text=True, timeout=120, env=_child_env()).stdout
         rows = json.loads(raw)
     except Exception as e:
         # Say it. Swallowing this made a broken agentsview indistinguishable
@@ -284,13 +284,40 @@ def _save_state(path, state):
     os.replace(tmp, path)
 
 
+# agentsview is a separately installed executable. Handing it our whole
+# environment hands it PLOW_AGENT_TOKEN -- the credential that identifies this
+# agent's owner -- on every single run, to a binary we do not ship, cannot
+# audit, and which has no use for it. An allowlist rather than a blocklist: a
+# blocklist is a promise to remember every future secret, and this process holds
+# whatever the container put in it.
+CHILD_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ",
+                  "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
+
+
+def _child_env():
+    env = {k: v for k, v in os.environ.items()
+           if k in CHILD_ENV_KEEP or k.startswith("AGENTSVIEW_")}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return env
+
+
+# What the collector actually reads. A table of the right NAME with none of
+# these is not a store we can diff, and treating it as one moves the ledger next
+# to it and deletes the original.
+REQUIRED_COLUMNS = ("model", "input_tokens", "output_tokens",
+                    "cache_read_tokens", "cache_write_tokens")
+
+
 def _has_usage_table(db):
-    """A store without session_model_usage is not the one we want."""
+    """Whether this file is a Hermes store the collector can read."""
     try:
         c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
-            return bool(c.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='session_model_usage'").fetchone())
+            if not c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='session_model_usage'").fetchone():
+                return False
+            have = {r[1] for r in c.execute("PRAGMA table_info(session_model_usage)")}
+            return all(col in have for col in REQUIRED_COLUMNS)
         finally:
             c.close()
     except sqlite3.Error:
@@ -876,6 +903,15 @@ def self_check():
                     "the right home adopts it"
             finally:
                 STATE_PATH = was
+
+            # A table of the right NAME but missing the columns the collector
+            # reads is not a store either, and it was passing the gate.
+            short = tempfile.mkdtemp()
+            cs = sqlite3.connect(os.path.join(short, "state.db"))
+            cs.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT)")
+            cs.commit(); cs.close()
+            assert not _has_usage_table(os.path.join(short, "state.db")), \
+                "a store missing the token columns is not one we can diff"
 
             # A state.db belonging to something ELSE is not a Hermes store.
             # It passes an existence check, so the ledger was moved and the

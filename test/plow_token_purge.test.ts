@@ -179,3 +179,34 @@ test("the image ships the client this repo builds", () => {
     "the image must install this client, under the name the reporter service execs");
   assert.doesNotMatch(dockerfile, /COPY[^\n]*hermes_client\.py/, "and not the tokenmaxxing fork");
 });
+
+test("the Plow token is never handed to the agentsview binary", () => {
+  // agentsview is separately installed: we do not ship it, cannot audit it, and
+  // it has no use for the credential that identifies this agent's owner. The
+  // inherited environment handed it over on every run.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-child-"));
+  const bin = path.join(home, "bin");
+  fs.mkdirSync(bin);
+  // A stand-in agentsview that reports what it was given.
+  const seen = path.join(home, "seen.txt");
+  fs.writeFileSync(path.join(bin, "agentsview"),
+    `#!/bin/sh
+env > ${seen}
+echo '[]'
+`, { mode: 0o755 });
+  fs.mkdirSync(path.join(home, ".local"));
+  fs.symlinkSync(bin, path.join(home, ".local", "bin"));   // where the client looks
+
+  client(["--agent", "x", "--dry-run"], home, {
+    PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel",   // pragma: allowlist secret
+    SOME_OTHER_SECRET: "also-not-for-a-child",             // pragma: allowlist secret
+  });
+
+  assert.ok(fs.existsSync(seen), "the stand-in agentsview should have run");
+  const childEnv = fs.readFileSync(seen, "utf8");
+  assert.doesNotMatch(childEnv, /plow-token-that-must-not-travel/,  // pragma: allowlist secret
+    "the child must never see the Plow token");
+  assert.doesNotMatch(childEnv, /also-not-for-a-child/,             // pragma: allowlist secret
+    "an allowlist, so a secret we have not thought of yet is also withheld");
+  assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
+});
