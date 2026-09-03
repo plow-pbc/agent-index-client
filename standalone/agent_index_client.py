@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 The Plow Collective, Inc
+# SPDX-License-Identifier: Apache-2.0
 """Publish one agent's token usage to the Agent Index.
 
     agent_index_client.py --agent life              # then: report usage
