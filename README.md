@@ -102,9 +102,23 @@ Two sources, summed, because neither covers a real machine alone:
   tokens** for every one, so without this a Hermes agent lands on the index at
   zero.
 
-**Set `HERMES_HOME` explicitly in a container.** A wrong path is not an error —
-it reads as zero tokens, which looks like an idle agent rather than a
-misconfiguration.
+**Set `HERMES_HOME` explicitly in a container**, and set it correctly: a path
+you name that holds no `state.db` is a **collector failure**. The run stops
+non-zero, says `configured but missing`, and reports nothing.
+
+That is deliberate, and it is the opposite of what this used to do. The server
+REPLACES a (day, model) total with what it is sent, so reporting what the other
+collector saw while this one is broken overwrites a correct number with a
+smaller one — the agent then reads as having done less work than it did, and
+nothing later corrects it. A missed run costs one hour and the next run carries
+it; a wrong total that looks right costs the number itself.
+
+An **unset** `HERMES_HOME` is different: nobody claimed there is a Hermes store,
+none turned up in the usual places, and an agent that does not run Hermes is the
+ordinary case. That reports quietly from whatever agentsview saw.
+
+The same rule covers agentsview: **installed and broken** stops the run,
+**not installed** does not.
 
 ## Packaging it into an agent image
 
@@ -126,7 +140,7 @@ anonymously.
 | Variable | Meaning |
 | --- | --- |
 | `AGENT_INDEX_API` | A **bare loopback origin** for local development (`http://localhost:8787`), or unset. The published index is compiled in: where an agent's usage goes is a code change, not an environment one. |
-| `HERMES_HOME` | Hermes instance home holding `state.db`. Default `~/.hermes`. |
+| `HERMES_HOME` | Hermes instance home holding `state.db`. Default `~/.hermes`, `~/.hermes-life`. Set it and the store must be there: naming a path with no `state.db` fails the run rather than reporting zero. |
 | `AGENT_ID` | Used when `--agent` is not passed. |
 
 ## Checking it works
@@ -135,6 +149,7 @@ anonymously.
 ./agent_index_client.py --self-check
 ```
 
-Asserts the collector merge, ordering, an empty result, a missing store, and
-epoch-format timestamps — that last one because Hermes stores `started_at` as a
+Asserts the collector merge, ordering, an empty result, a configured store that
+is missing (which must fail and must not post), a partial report being refused,
+the usage ledger moving beside its store, and epoch-format timestamps — that last one because Hermes stores `started_at` as a
 unix float, and reading it as a string makes every row silently vanish.
