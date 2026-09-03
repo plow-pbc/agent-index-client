@@ -1081,6 +1081,9 @@ def self_check():
     # a correct total with a smaller one -- the agent then reads as having done
     # less work than it did, which is worse than a gap.
     with tempfile.TemporaryDirectory() as partial:
+        os.makedirs(os.path.join(partial, ".agent-index"))
+        with open(os.path.join(partial, ".agent-index", "token"), "w") as f:
+            f.write("aik_" + "k" * 43)
         c5 = make_store(partial, rows=[("s", "gpt-5.5", 5, 5, 0, 0, time.time(), time.time())])
         st5 = os.path.join(partial, ".agent-index-state.json")
         from_hermes(28, home=partial, state_path=st5)          # baseline
@@ -1107,15 +1110,13 @@ def self_check():
         # It never tried to post: the unreachable endpoint would have said so.
         assert "could not reach" not in out, f"it must not have posted at all: {out}"
 
-    # A Plow container carries its own token and needs no sign-in at all, and
-    # it must be PREFERRED over any stored key: the key is a leftover from the
-    # GitHub era and nothing mints new ones.
-    os.environ["PLOW_AGENT_TOKEN"] = "plow_tok_selfcheck"
-    try:
-        h = auth_headers()
-        assert h["authorization"] == "Bearer plow_tok_selfcheck", h
-    finally:
-        del os.environ["PLOW_AGENT_TOKEN"]
+    # Reports use the stored report-only key; the Plow token is only for the
+    # one-time assertion exchange.
+    with tempfile.TemporaryDirectory() as key_home:
+        path = os.path.join(key_home, "token")
+        with open(path, "w") as f:
+            f.write("aik_" + "k" * 43)
+        assert token(path).startswith("aik_")
 
 
     # An unreachable server is a reported failure, not a traceback in a
