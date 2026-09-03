@@ -294,6 +294,7 @@ def from_hermes(days, home=None, state_path=None):
         homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
     db = next((c for c in (os.path.join(h, "state.db") for h in homes)
                if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
+    legacy_lost = False
     if state_path is None:
         # Beside the store it snapshots, NOT in the home directory. A container
         # recreated with a persistent Hermes volume but a fresh home lost the
@@ -306,7 +307,14 @@ def from_hermes(days, home=None, state_path=None):
             # it over is the whole point: leaving it behind would cause exactly
             # the re-baseline this change exists to prevent.
             legacy = _load_state(STATE_PATH)
-            if legacy and not legacy.get("unreadable"):
+            if legacy.get("unreadable"):
+                # Corrupt, but its EXISTENCE is the fact that matters: this
+                # install has been reporting. Dropping the marker here left the
+                # destination looking untouched, which reads as a first install
+                # and replays -- the corrupt case sneaking back in through the
+                # migration instead of the front door.
+                legacy_lost = True
+            elif legacy:
                 _save_state(state_path, legacy)
                 try:
                     os.remove(STATE_PATH)
@@ -369,7 +377,7 @@ def from_hermes(days, home=None, state_path=None):
     # snapshot, every counter would diff against zero and the whole lifetime of
     # every session would land on today, over reports that were already correct.
     # It re-snapshots and credits nothing.
-    lost = bool(state.get("unreadable"))
+    lost = bool(state.get("unreadable")) or legacy_lost
     fresh_install = snap is None and not lost
     snap, ledger = snap or {}, state.get("daily") or {}
     cur, today = {}, datetime.date.today().isoformat()
@@ -801,6 +809,22 @@ def self_check():
                 # is now -- that part is supposed to be replaced every run.)
                 assert "baseline recorded" not in said, \
                     f"an install with a ledger must not start over: {said}"
+            finally:
+                STATE_PATH = was
+
+            # A CORRUPT legacy ledger is still evidence that this install has
+            # been reporting. Recognising it and then dropping it left the
+            # destination absent, which reads as a first install and replays --
+            # the migration letting the corrupt case in through the side door.
+            os.remove(beside)
+            broken_home = tempfile.mkdtemp()
+            os.makedirs(os.path.join(broken_home, ".agent-index"))
+            broken = os.path.join(broken_home, ".agent-index", "hermes-state.json")
+            open(broken, "w").write("{not json")
+            was, STATE_PATH = STATE_PATH, broken
+            try:
+                assert from_hermes(28, home=moved) == {}, \
+                    "a corrupt ledger in the old location must not become a replay"
             finally:
                 STATE_PATH = was
             c4.close()

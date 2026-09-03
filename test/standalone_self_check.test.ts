@@ -31,18 +31,6 @@ test("running the tests never touches the developer's own token", () => {
   assert.ok(fs.existsSync(token), "a test run must not delete files in a real home");
 });
 
-test("the client refuses to send the Plow token over cleartext http", () => {
-  const run = (api: string) => {
-    try {
-      return execFileSync("python3", [CLIENT, "--agent", "x", "--dry-run"],
-        { encoding: "utf8", env: { ...process.env, AGENT_INDEX_API: api, HOME: fs.mkdtempSync(path.join(os.tmpdir(), "aic-")) } });
-    } catch (e: any) {
-      return String(e.stdout || "") + String(e.stderr || "");
-    }
-  };
-  assert.match(run("http://agent-index-server.example.com"), /must be https/);
-  // Localhost is the exception, and only localhost: that traffic never leaves
-  // the machine, and a local server is why this variable exists.
-  assert.doesNotMatch(run("http://127.0.0.1:3000"), /must be https/);
-  assert.doesNotMatch(run("https://agent-index-server.example.com"), /must be https/);
-});
+// URL policy (https, loopback, userinfo) lives in plow_token_purge.test.ts,
+// next to the runner those cases need. It was asserted in both suites, and two
+// copies of a security rule drift apart exactly when one of them stops running.

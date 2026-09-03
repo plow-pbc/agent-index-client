@@ -9,10 +9,10 @@ That is a different product, not a flag:
 | --- | --- |
 | one stable human username | many agents, spawned and killed per task |
 | `client_id` is the machine | the machine is a container that dies; the agent identity has to outlive it |
-| daily totals per user | per-run rows — what one task cost |
+| daily totals per user | daily totals per AGENT, keyed on the agent id, not the person running it |
 | tokens are the score | tokens alone say nothing; an agent that burns 2M and finishes beats one that burns 200k and gives up |
 | cost in dollars | subscription-billed agents report `$0.00` (`cost_status: included`), so a dollar ranking puts a whole fleet at zero |
-| flat list of users | agents delegate — runs form a tree via `parent_run_id` |
+| flat list of users | one row per agent, with the person behind it resolved from their Plow token |
 
 ## `standalone/`
 
@@ -38,7 +38,17 @@ clients read `$HERMES_HOME/state.db` instead. Its four token counters are
 disjoint (`prompt_tokens = input + cache_read + cache_write`) and reasoning is a
 subset of output, so nothing is added twice.
 
+## What ships today
+
+The row key is the **agent**, and the container reports to `agent-index-server`,
+not tokenmaxxing. Identity is the container's own `PLOW_AGENT_TOKEN`, which the
+index resolves by asking Plow — no sign-in, no GitHub, no second account.
+
+Per-run rows (`api_calls`, `end_reason`, `parent_run_id`, a delegation tree) are
+NOT shipped. The collector sends day x model token counts, because that is what
+the server accepts and what the page draws. If that shape is ever wanted, the
+starting point is in git history rather than in this tree.
+
 ## Next
 
-Change the row key from user to agent, and repoint the container at
-`agent-index-server` instead of tokenmaxxing.
+Nothing planned. The cutover above is done.
