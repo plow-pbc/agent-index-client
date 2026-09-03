@@ -614,13 +614,12 @@ def tags():
         sys.exit(f"  could not read tags from {_shown(url)}: {type(e).__name__}")
 
 
-def register(agent, argv):
-    """Create this agent's row on the Index, so it has a page to report into.
+def registration_body(agent, argv):
+    """The registration payload, from the flags as typed.
 
-    Registration is refused a key we issued ourselves, because claiming an id
-    is the one thing its owner cannot undo. It takes the container's Plow
-    token, which only Plow can vouch for, so a stranger's whole path is: curl
-    the file, --register, then run it on a timer.
+    Its own function so the self-check can assert on what registration actually
+    sends: a second copy of this mapping in the test is a copy that can agree
+    with itself while disagreeing with the client.
     """
     def opt(flag, default=None):
         return argv[argv.index(flag) + 1] if flag in argv else default
@@ -645,7 +644,18 @@ def register(agent, argv):
     images = [argv[i + 1] for i, a in enumerate(argv) if a == "--image"]
     if images:
         body["images"] = images
+    return body
 
+
+def register(agent, argv):
+    """Create this agent's row on the Index, so it has a page to report into.
+
+    Registration is refused a key we issued ourselves, because claiming an id
+    is the one thing its owner cannot undo. It takes the container's Plow
+    token, which only Plow can vouch for, so a stranger's whole path is: curl
+    the file, --register, then run it on a timer.
+    """
+    body = registration_body(agent, argv)
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, auth_headers())
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
@@ -1041,20 +1051,16 @@ def self_check():
     # --owner-name says what the PERSON is called; --builder-name credits
     # whoever built the agent. Usually one person, occasionally not -- so the
     # default is "you built it", and saying otherwise takes one more flag.
-    def registered(argv):
-        body = {}
-        def opt(flag, default=None):
-            return argv[argv.index(flag) + 1] if flag in argv else default
-        body["builder_name"] = opt("--builder-name")
-        body["owner_name"] = opt("--owner-name", opt("--builder-name"))
-        return body
+    # Asserted against the SERIALIZER the client posts with, not a copy of it.
+    def names(argv):
+        b = registration_body("x", argv)
+        return (b.get("builder_name"), b.get("owner_name"))
 
-    assert registered(["--builder-name", "Daniel"]) == {"builder_name": "Daniel", "owner_name": "Daniel"}, \
+    assert names(["--builder-name", "Daniel"]) == ("Daniel", "Daniel"), \
         "the common case: you built it, so it is your name"
-    assert registered(["--builder-name", "Paul Lucas", "--owner-name", "Daniel"]) == \
-        {"builder_name": "Paul Lucas", "owner_name": "Daniel"}, \
+    assert names(["--builder-name", "Paul Lucas", "--owner-name", "Daniel"]) == ("Paul Lucas", "Daniel"), \
         "crediting somebody else must not rename you"
-    assert registered(["--owner-name", "Daniel"]) == {"builder_name": None, "owner_name": "Daniel"}, \
+    assert names(["--owner-name", "Daniel"]) == (None, "Daniel"), \
         "and you can say your name without crediting anyone"
 
     # --video takes a YouTube id because the page embeds
