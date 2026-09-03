@@ -343,6 +343,9 @@ def from_hermes(days, home=None, state_path=None):
     # the table. ~/.hermes can exist while holding a different schema, and the
     # old code errored on it instead of trying ~/.hermes-life next door, which
     # is where a Plow agent's store actually lives. Measured, not assumed.
+    # Told where to look, or guessing. The difference decides what an absent
+    # store MEANS, so it is carried rather than inferred later.
+    configured = bool(home or os.environ.get("HERMES_HOME"))
     if home:
         homes = [home]
     elif os.environ.get("HERMES_HOME"):
@@ -400,10 +403,17 @@ def from_hermes(days, home=None, state_path=None):
                     # recover from if it turns out to be wrong.
                     print(f"  copied the usage ledger to {state_path}, keeping {STATE_PATH}")
     if not os.path.exists(db):
-        # Say so. A wrong HERMES_HOME otherwise reports zero tokens, which
-        # reads as an idle agent rather than a misconfiguration — and inside a
-        # container nobody is watching the path resolve.
-        print(f"  no Hermes store at {db} (set HERMES_HOME if that is wrong)")
+        if configured:
+            # Somebody named this path, and there is nothing there. That is a
+            # collector that FAILED, not one with nothing to say -- and the
+            # difference is the whole report: recorded as a failure it stops the
+            # run, while returning empty lets an agentsview-only payload post
+            # and REPLACE this agent's totals with numbers that omit Hermes.
+            FAILURES.append(f"hermes store {db}: configured but missing")
+        else:
+            # Nobody said where Hermes lives and no store turned up in the usual
+            # places. An agent that does not run Hermes is the common case.
+            print(f"  no Hermes store at {db} (set HERMES_HOME if that is wrong)")
         return {}
     # Snapshot-and-diff, because the counters are CUMULATIVE per session.
     #
@@ -755,7 +765,13 @@ def self_check():
     gpt = [x for x in m[1]["models"] if x["model"] == "gpt"][0]
     assert gpt == {"model": "gpt", "input": 11, "output": 2, "cache_read": 5, "cache_write": 0}, gpt
     assert merge({}, {}) == [], "no data must send no days, not a day of zeros"
+    # A store somebody NAMED and that is not there is a failure, not silence:
+    # reported as silence, an agentsview-only payload posts and replaces this
+    # agent's totals with numbers that leave Hermes out.
+    before = len(FAILURES)
     assert from_hermes(28, home="/nonexistent") == {}, "a missing store is empty, not a crash"
+    assert len(FAILURES) == before + 1, "a configured store that is absent must be a FAILURE"
+    FAILURES.pop()
 
     # The counters are CUMULATIVE per session, so the collector diffs against a
     # snapshot rather than dating them by a column. These assertions pin the
@@ -1050,17 +1066,33 @@ def self_check():
     assert code == 0 and "could not reach" in body.get("error", ""), (code, body)
 
     # A quiet run must never fail because we could not ANNOUNCE that it was
-    # quiet. The announcement is not the measurement.
+    # quiet. The announcement is not the measurement. Quiet means a store that
+    # is THERE and has nothing in it -- an agent that has not worked yet.
     with tempfile.TemporaryDirectory() as empty_home:
+        make_store(empty_home).close()
         quiet = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
             capture_output=True, text=True,
-            env={**os.environ, "HERMES_HOME": "/nonexistent", "HOME": empty_home,
+            env={**os.environ, "HERMES_HOME": empty_home, "HOME": empty_home,
                  "AGENT_INDEX_API": "http://127.0.0.1:9"})
     assert "Traceback" not in quiet.stderr, \
         f"a quiet run must not crash, with or without a reachable server: {quiet.stderr[-300:]}"
     assert quiet.returncode == 0, \
         f"a quiet run reports nothing and succeeds; it must not fail: {quiet.stdout[-200:]}"
+
+    # A store somebody CONFIGURED and that is absent is the opposite case: it
+    # must fail, and must not post. Reported as quiet, an agentsview-only
+    # payload would replace this agent's totals with numbers omitting Hermes.
+    with tempfile.TemporaryDirectory() as no_store:
+        gone = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--agent", "selfcheck-none"],
+            capture_output=True, text=True,
+            env={**os.environ, "HERMES_HOME": os.path.join(no_store, "nothing-here"),
+                 "HOME": no_store, "AGENT_INDEX_API": "http://127.0.0.1:9"})
+    out = gone.stdout + gone.stderr
+    assert gone.returncode != 0, f"a configured store that is missing must fail: {out[-300:]}"
+    assert "configured but missing" in out, out
+    assert "could not reach" not in out, f"and must not have posted: {out[-300:]}"
 
     assert _unknown_flags(["--oops"]) == ["--oops"], "a typo must be caught"
     assert _unknown_flags(["--body", "-1 week of work"]) == [], \
