@@ -233,15 +233,13 @@ def load_state(path=None):
     opposites: treating it as absent mints a second install and strands every
     row the first one wrote, while inventing one is the same thing with extra
     steps. So neither -- stop, and name the file."""
-    # A path we were HANDED is a file, not this machine's install: the
-    # superseded credential belongs to whoever owns the real one, and retiring
-    # it from under a caller that only asked us to read a file reaches outside
-    # what it asked for.
+    # A path we were HANDED is a file, not this machine's install, so the
+    # layout that preceded this one is not its business either.
     mine, path = path is None, path or state_path()
     try:
         raw = open(path).read()
     except FileNotFoundError:
-        return adopt_split_state(path) if mine else {}
+        return legacy_state() if mine else {}
     except OSError as e:
         sys.exit(f"  this install's state at {path} could not be READ: {e}\n"
                  f"  refusing to run: reporting past it would start a second install "
@@ -270,48 +268,43 @@ def load_state(path=None):
         sys.exit(f"  this install's id in {path} is not a usable id\n"
                  f"  refusing to run: minting against a new one would strand the usage "
                  f"this install has already published.")
-    # The same cleanup the migrating run does. A superseded key that outlived
-    # its migration is retired here or never, because this is the branch every
-    # later run takes.
-    if mine:
-        retire_legacy()
     return {"install_id": install, "key": key}
 
 
-def adopt_split_state(path):
-    """The file the key used to live in, carried into the one that replaced it.
+_STATE_LOCK = None
 
-    One shipped layout to come from: a key at TOKEN_PATH and no id, which is
-    every install that registered before ids existed. Write the pair, THEN
-    retire the original -- a crash between them leaves it to be adopted again
-    rather than nothing at all."""
+
+def legacy_state():
+    """The layout that shipped: a key at TOKEN_PATH and no install id.
+
+    READ, and nothing else. An install moves to the file that replaced it when
+    somebody registers it -- one explicit, non-concurrent act -- and until then
+    it keeps reporting from where its key already is. Migrating underneath a
+    report bought nothing and cost a whole-run lock, a cleanup that had to be
+    retried on every load, and a reader with side effects."""
     try:
         key = open(TOKEN_PATH).read().strip()
     except FileNotFoundError:
         return {}
     except OSError as e:
         sys.exit(f"  the stored credential at {TOKEN_PATH} could not be READ: {e}\n"
-                 f"  refusing to run: registering past a key we cannot read would start "
+                 f"  refusing to run: reporting past a key we cannot read would start "
                  f"a second install and strand the usage this one has published")
-    # A key that is not ours is not carried: startup's purge owns that file, and
-    # migrating a leftover GitHub bearer would smuggle it past the deletion.
-    if not AGENT_KEY.match(key):
-        return {}
-    state = {"install_id": "", "key": key}      # unnamed, which is what it is
-    save_private(path, json.dumps(state))
-    retire_legacy()
-    print(f"  moved this install's key into {path}")
-    return state
-
-
-# The lock is held by the open file, so it has to outlive the call that took
-# it: a local would be closed on return and the lock released with it, leaving
-# a run that believes it is serialised and is not.
-_STATE_LOCK = None
+    # A key that is not ours is not one to report with: startup's purge owns
+    # that file and will have taken it.
+    return {"install_id": "", "key": key} if AGENT_KEY.match(key) else {}
 
 
 def hold_state_lock():
-    """Serialise this run against every other one on this install."""
+    """ONE registration at a time on this install, from reading its state to
+    writing the new one.
+
+    Two overlapping ones each read "no id", each generate their own, and their
+    renames interleave. Serialised, the second reads what the first wrote and
+    mints for that same install, which is the right answer and not merely a
+    safe one. Held by the open file, which is why it is kept in a global: a
+    local would be closed on return and the lock released with it, leaving a
+    registration that believes it is serialised and is not."""
     global _STATE_LOCK
     os.makedirs(state_dir(), exist_ok=True)
     _STATE_LOCK = open(os.path.join(state_dir(), ".agent-index.lock"), "w")
@@ -319,17 +312,8 @@ def hold_state_lock():
 
 
 def retire_legacy():
-    """The file the key used to live in, gone once it is safely in the one that
-    replaced it.
-
-    Runs on EVERY load, not only the one that migrates. Removed only on the
-    migrating run, a removal that failed left a second live copy of the
-    credential on disk for good: the next run reads the canonical file, returns
-    early, and never looks at the old one again.
-
-    And a failure here is loud. "Migrated" with the old key still sitting there
-    is the one outcome that is worse than not having migrated, because nothing
-    afterwards is looking."""
+    """The file the key used to live in, gone once this install's own file
+    holds it. Only "not there" is success."""
     try:
         os.remove(TOKEN_PATH)
     except FileNotFoundError:
@@ -869,6 +853,7 @@ def register(agent, argv):
     # so those days read high until they age out of the window. Nothing can
     # move the old rows instead -- an owner's legacy installs all share the ''
     # bucket, so there is no way to tell which of them wrote what.
+    hold_state_lock()
     mine = load_state().get("install_id") or secrets.token_hex(16)
     mint = {"label": agent, "install_id": mine}
     code, key_out = _post(API + "/v1/keys", mint, assertion)
@@ -891,6 +876,12 @@ def register(agent, argv):
     # replaced, and every report after that went to the '' bucket while the
     # file said otherwise.
     save_private(state_path(), json.dumps({"install_id": minted_install, "key": key_out["key"]}))
+    # The explicit upgrade: registering is what moves an install off the layout
+    # that shipped, and the key it used to live in goes now that this file
+    # holds it. Loud if it cannot, because a second live copy of the credential
+    # on disk is worse than not having moved at all -- and this is the run
+    # somebody is watching.
+    retire_legacy()
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on
@@ -973,20 +964,7 @@ def main(argv):
     # first deleted the token off the machine of whoever ran the tests.
     if "--self-check" in argv:
         return self_check()
-    # ONE process at a time touching this install's state, and the lock is taken
-    # BEFORE anything reads it. After the purge, which owns the legacy file and
-    # reads no state -- and which has the useful thing to say about a home this
-    # process cannot write to.
-    #
-    # Held only by register() it was not enough: a reporting run could read the
-    # legacy key, pause while a registration wrote the newly minted pair, and
-    # then adopt on top of it -- putting this install back in the bucket the
-    # registration had just moved it out of. Reading and writing are the same
-    # critical section, so the lock has to be older than the first read.
-    #
-    # Released when this process ends, which is the only thing that ends a run.
     purge_unusable_token()
-    hold_state_lock()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
         sys.exit(__doc__)

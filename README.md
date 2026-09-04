@@ -78,11 +78,11 @@ separately, a crash between the writes left the id claiming a named install
 while the key on disk was still the unnamed one it replaced, and every report
 after that went to the wrong place while the files said otherwise.
 
-An install that predates this file is carried into it on its next run — its key
-moves in, it keeps reporting unnamed until it names itself, and
-`~/.agent-index/token` is removed once the key is safely inside. If that removal
-cannot happen the run stops and says so, rather than leaving a second live copy
-of the credential on a disk nothing will look at again.
+An install that predates this file keeps reporting from where its key already
+is: reads move nothing. It upgrades when you register it — `--register` writes
+the new file and removes `~/.agent-index/token` once the key is safely inside,
+and stops with an error if that removal cannot happen rather than leaving a
+second live copy of the credential lying around.
 
 This needs an Index that accepts and echoes an `install_id` on `POST /v1/keys`.
 
