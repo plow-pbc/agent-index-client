@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Publish one agent's token usage to the Agent Index.
 
+    agent_index_client.py --register --agent life [--install-url URL]
     agent_index_client.py --agent life              # then: report usage
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
@@ -17,9 +18,14 @@ Collects from two places, because neither alone covers a real machine:
     own agents run on, so relying on agentsview alone puts them on the board at
     zero.
 
-Sends day x model token counts and nothing else: no prompts, no task titles,
-no file paths, no costs. Reports use the stored Index-issued key; the Plow
-token is used only once to exchange for an assertion during registration.
+Sends, per call: --register posts the page content you hand it (agent id,
+name, blurb, repo, runtime, video, images, install-url), all of it public
+because it IS the agent's page; a report posts day x model token counts and
+nothing else; --story posts the one story you wrote. No prompts, no task
+titles, no file paths, no costs -- the only thing read off this machine and
+sent is the token counts, and everything else is what you typed. Reports use
+the stored Index-issued key; the Plow token is used only once to exchange for
+an assertion during registration.
 """
 import datetime
 import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
@@ -667,6 +673,12 @@ def register(agent, argv):
         "name": opt("--name"), "blurb": opt("--blurb"), "repo": opt("--repo"),
         "runtime": opt("--runtime"),
     }.items() if v}
+    # NOT filtered by `if v` like the rest: "" is how a publisher takes a bad
+    # link off a page anyone can read, and dropping it here would leave them
+    # with no way to. The server treats "" as a clear and an absent field as
+    # "leave what is on record alone".
+    if opt("--install-url") is not None:
+        body["install_url"] = opt("--install-url")
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
         # not a URL — passing a URL renders a broken player on a public page.
@@ -716,13 +728,17 @@ def publish_story(agent, argv):
     sys.exit(0 if code == 200 else 1)
 
 
-VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
-               "--name", "--blurb", "--repo", "--runtime", "--video",
-               }
-KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
-               "--title", "--body", "--tag", "--image", "--days", "--dry-run",
-               "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--help", "-h"}
+# Every option declared ONCE, in the set that says whether it takes a value;
+# what is merely "known" is the union of the two. The old pair listed most
+# flags twice, and that is exactly how --story came to be known but not
+# value-taking: a story id or --body starting with a dash was then read as an
+# unknown option and the run refused -- the one failure the value skip below
+# exists to prevent.
+VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
+               "--image", "--name", "--blurb", "--repo", "--runtime",
+               "--video", "--install-url"}
+BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
+KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 
 
 def _unknown_flags(argv):
@@ -1182,6 +1198,12 @@ def self_check():
     assert _unknown_flags(["--dry-run", "--agent", "x"]) == [], "known flags pass"
     assert _unknown_flags(["--body", "-a", "--oops"]) == ["--oops"], \
         "a typo after a skipped value is still caught"
+    # What the two drifting tables used to get wrong. A loop over VALUE_FLAGS
+    # would be tautological -- the skip is keyed on that set -- so this names
+    # the flag whose membership was the bug: --story was known but not
+    # value-taking, so a dash-leading story id was refused as a typo.
+    assert not VALUE_FLAGS & BARE_FLAGS, "a flag either takes a value or it does not"
+    assert _unknown_flags(["--story", "-1 week of work"]) == [], "--story takes a value"
 
     print("self-check OK — merge, flag parsing, and the Hermes delta collector")
 

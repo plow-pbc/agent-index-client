@@ -389,6 +389,32 @@ test("registration trades the Plow token for an assertion, and stores what the I
   }
 });
 
+// --install-url is the one registration field a publisher can UNSET, so its
+// three states are checked at the wire rather than in the argv parser: a link
+// is sent, an empty one is sent, and an omitted flag says nothing at all. The
+// server reads absent as "leave what is on record alone", so a client that
+// dropped the empty value -- as it does for every other empty field -- would
+// leave an owner no way to take a bad link off a page anyone can read.
+test("--install-url sends a link, sends a clear, and stays silent when omitted", async () => {
+  for (const [label, args, sent] of [
+    ["a link is sent", ["--install-url", "https://example.com/how-to-install"], "https://example.com/how-to-install"],
+    ["an empty one is sent, and clears", ["--install-url", ""], ""],
+    ["an omitted flag must not clear a tutorial the owner set earlier", [], undefined],
+  ] as const) {
+    const s = await standIns();
+    try {
+      const { home, env } = bootstrapHome(s);
+      const r = await clientAsync(["--register", "--agent", "purge-test", ...args], home, env);
+      assert.equal(r.code, 0, r.out);
+      const body = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
+      if (sent === undefined) assert.ok(!("install_url" in body), label);
+      else assert.equal(body.install_url, sent, label);
+    } finally {
+      await s.close();
+    }
+  }
+});
+
 test("every later report carries the stored key alone, and never goes back to Plow", async () => {
   const s = await standIns();
   try {

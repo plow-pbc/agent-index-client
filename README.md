@@ -8,8 +8,16 @@ this runs where the agent runs, which is usually a container or a small VPS.
 
 ## What it sends
 
-Token counts per day per model, and stories you choose to publish. **Nothing
-else.** No prompts, no task text, no file paths, no costs.
+Three calls, three payloads:
+
+- `--register` posts the page content you hand it — the agent id, plus whatever
+  you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
+  `--image` and `--install-url`. All of it is public: it *is* the agent's page.
+- A report posts day x model token counts, and nothing else.
+- `--story` posts the one story you wrote — its title, body, tags and images.
+
+**No prompts, no task text, no file paths, no costs.** The only thing read off
+this machine and sent is the token counts; everything else is what you typed.
 
 ## Install
 
@@ -66,6 +74,11 @@ the Index resolves the creator from Plow.
 
 `--video` takes a YouTube **video id**, not a URL — the page embeds
 `youtube-nocookie.com/embed/<id>`.
+
+`--install-url` is the tutorial that shows people how to install this agent,
+step by step. Community agents have no cloud deploy path, so it is what their
+Index page links to instead; an https link only, and `--install-url ""` takes
+one back off the page.
 
 
 ```bash

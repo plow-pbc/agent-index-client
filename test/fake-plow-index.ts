@@ -13,10 +13,21 @@ export const ASSERTION = "plow_index_" + "a".repeat(40);     // pragma: allowlis
 /** What the Index mints in exchange, and every later report carries. */
 export const MINTED_KEY = "aik_" + "m".repeat(43);           // pragma: allowlist secret
 
-export type Hit = { method: string; path: string; bearer: string };
+export type Hit = { method: string; path: string; bearer: string; body?: unknown };
 
 function bearerOf(req: http.IncomingMessage): string {
   return String(req.headers["authorization"] || "");
+}
+
+/** What the caller SENT, so a hit can be checked for content and not only for
+ *  which credential carried it. A body that will not parse throws HERE: the
+ *  client serialises every one of these, so unparseable is a transport failure,
+ *  and swallowing it would surface as a puzzling assertion much further away. */
+async function bodyOf(req: http.IncomingMessage): Promise<unknown> {
+  const raw = await new Promise<string>((r) => {
+    let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => r(b));
+  });
+  return raw ? JSON.parse(raw) : undefined;
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -64,10 +75,10 @@ export async function standIns(): Promise<StandIns> {
     json(res, 200, { assertion: ASSERTION });
   });
 
-  const index = await listen((req, res) => {
+  const index = await listen(async (req, res) => {
     const path = new URL(req.url || "/", "http://x").pathname;
     const bearer = bearerOf(req);
-    indexHits.push({ method: req.method || "", path, bearer });
+    indexHits.push({ method: req.method || "", path, bearer, body: await bodyOf(req) });
     // Registration and minting are the assertion's job, and ONLY the
     // assertion's: a Plow token here is the leak, so it is a 401.
     if (path === "/v1/agents" || path === "/v1/keys") {
