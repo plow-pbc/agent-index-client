@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Publish one agent's token usage to the Agent Index.
 
+    agent_index_client.py --register --agent life [--install-url URL]
     agent_index_client.py --agent life              # then: report usage
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
@@ -17,9 +18,14 @@ Collects from two places, because neither alone covers a real machine:
     own agents run on, so relying on agentsview alone puts them on the board at
     zero.
 
-Sends day x model token counts and nothing else: no prompts, no task titles,
-no file paths, no costs. Reports use the stored Index-issued key; the Plow
-token is used only once to exchange for an assertion during registration.
+Sends, per call: --register posts the page content you hand it (agent id,
+name, blurb, repo, runtime, video, images, install-url), all of it public
+because it IS the agent's page; a report posts day x model token counts and
+nothing else; --story posts the one story you wrote. No prompts, no task
+titles, no file paths, no costs -- the only thing read off this machine and
+sent is the token counts, and everything else is what you typed. Reports use
+the stored Index-issued key; the Plow token is used only once to exchange for
+an assertion during registration.
 """
 import datetime
 import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request

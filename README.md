@@ -8,8 +8,16 @@ this runs where the agent runs, which is usually a container or a small VPS.
 
 ## What it sends
 
-Token counts per day per model, and stories you choose to publish. **Nothing
-else.** No prompts, no task text, no file paths, no costs.
+Three calls, three payloads:
+
+- `--register` posts the page content you hand it — the agent id, plus whatever
+  you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
+  `--image` and `--install-url`. All of it is public: it *is* the agent's page.
+- A report posts day x model token counts, and nothing else.
+- `--story` posts the one story you wrote — its title, body, tags and images.
+
+**No prompts, no task text, no file paths, no costs.** The only thing read off
+this machine and sent is the token counts; everything else is what you typed.
 
 ## Install
 
