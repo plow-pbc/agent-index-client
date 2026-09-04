@@ -57,11 +57,17 @@ A fresh install exchanges its Plow token for a short-lived assertion, then the
 Index mints its report-only key. A GitHub bearer left in that file is a
 different matter and is deleted on the next run rather than sent.
 
-Beside it, `~/.agent-index/install` holds this install's id. The Index counts a
-day's usage under that id, not under the key, so re-registering to replace a
-compromised key keeps this install's numbers on the rows they were already on
-instead of starting a second install that double-counts the day. An install
-from before this file existed gets one on its next `--register`.
+This install's id lives beside the Hermes store, at
+`<HERMES_HOME>/.agent-index-install`, on the same volume as the usage ledger and
+for the same reason: a container recreated with its data volume and a fresh home
+must still be the same install. The Index counts a day's usage under that id
+rather than under the key, so replacing a compromised key keeps this install's
+numbers on the rows they were already on instead of starting a second install
+that double-counts the day.
+
+An install that predates the file keeps reporting exactly as it does now: it
+claims no id, and the Index leaves its key unnamed, which is where its existing
+rows already are.
 
 ## Use
 

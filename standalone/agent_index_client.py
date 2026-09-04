@@ -28,7 +28,7 @@ the stored Index-issued key; the Plow token is used only once to exchange for
 an assertion during registration.
 """
 import datetime
-import json, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 # Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
@@ -104,13 +104,6 @@ API = _api(os.environ.get("AGENT_INDEX_API", ""))
 PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
 LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
-# WHICH install this is, beside the credential that reports for it. The Index
-# keys a day's usage on this, and a key is not it: recovering a compromised
-# install revokes the key and mints another, and keyed on the credential the
-# replacement reads as a second install -- its next cumulative report lands
-# beside the old rows instead of on them, and the day is counted twice. Kept in
-# its own file so replacing the key never disturbs it.
-INSTALL_PATH = os.path.expanduser("~/.agent-index/install")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
 # Collectors append here when a read genuinely FAILED, as opposed to finding
@@ -210,17 +203,6 @@ def index_assertion():
     return {"authorization": "Bearer " + assertion}
 
 
-def save_private(path, value):
-    """Write by rename, 0600: a reader that opens mid-write sees the old value
-    or the new one, never half of either."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp = path + ".new"
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(value)
-    os.replace(temp, path)
-
-
 # The shape the Index accepts back, so a corrupted file is dropped here rather
 # than refused on the far side after the key is already minted against a new
 # install id -- which is the split this whole file exists to prevent.
@@ -228,12 +210,29 @@ INSTALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 def install_id(path=None):
-    """This install's id, or "" if there is not one we can use yet."""
+    """This install's id, or "" if this install has never been given one.
+
+    Only ABSENT means "". Unreadable or malformed is a file that says this
+    install HAS an id we cannot read, and the two wrong answers are opposites:
+    treating it as absent silently mints a second install and strands every row
+    the first one wrote, while inventing one is the same thing with extra
+    steps. So neither -- stop, and name the file, which is a ten-second fix
+    once somebody is told and is nothing at all if nobody is."""
+    path = path or install_path()
     try:
-        stored = open(path or INSTALL_PATH).read().strip()
-    except OSError:
+        stored = open(path).read().strip()
+    except FileNotFoundError:
         return ""
-    return stored if INSTALL_ID.match(stored) else ""
+    except OSError as e:
+        sys.exit(f"  this install's id at {path} could not be READ: {e}\n"
+                 f"  refusing to run: reporting past it would start a second install "
+                 f"and strand the usage this one has already published")
+    if stored and not INSTALL_ID.match(stored):
+        sys.exit(f"  this install's id at {path} is not a usable id\n"
+                 f"  refusing to run: minting against a new one would strand the usage "
+                 f"this install has already published. Delete the file to start over "
+                 f"as a new install, or restore it from a backup of the volume.")
+    return stored
 
 
 # The one shape a stored credential may have: the index mints aik_ + 43
@@ -363,16 +362,23 @@ def _load_state(path=None):
     return {"unreadable": True}
 
 
-def _save_state(path, state):
-    """Written atomically at 0600 — a half-written ledger would misreport, and a
-    partial rename would lose the baseline and re-dump history on the next run."""
-    path = path or STATE_PATH
+def save_private(path, value):
+    """Write by rename, 0600: a reader that opens mid-write sees the old value
+    or the new one, never half of either. The key, the install and the ledger
+    all need exactly this, and a second copy of it is a second thing to get
+    wrong -- the ledger's copy already used a different temp suffix."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = path + ".new"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump(state, f)
+        f.write(value)
     os.replace(tmp, path)
+
+
+def _save_state(path, state):
+    """A half-written ledger would misreport, and a partial rename would lose
+    the baseline and re-dump history on the next run."""
+    save_private(path or STATE_PATH, json.dumps(state))
 
 
 # agentsview is a separately installed executable. Handing it our whole
@@ -428,6 +434,36 @@ def _has_usage_table(db):
         return False
 
 
+def hermes_store(home=None):
+    """The Hermes store this install reports from.
+
+    Told where to look, or guessing. ~/.hermes can exist while holding a
+    different schema, so each candidate is checked for the table rather than
+    for existence: the old code errored on the first path instead of trying
+    ~/.hermes-life next door, which is where a Plow agent's store actually
+    lives. Measured, not assumed."""
+    if home:
+        homes = [home]
+    elif os.environ.get("HERMES_HOME"):
+        homes = [os.environ["HERMES_HOME"]]
+    else:
+        homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
+    return next((c for c in (os.path.join(h, "state.db") for h in homes)
+                 if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
+
+
+def install_path(home=None):
+    """Where this install's id lives: beside the store and the ledger, on the
+    volume a container keeps.
+
+    NOT in the home directory. A shipped container is recreated with its data
+    volume intact and a FRESH home -- that is what the ledger already moved out
+    of the home to survive -- so an install id kept there is lost on every
+    recreation, and the install mints a new id and strands the rows it has
+    been writing. Same volume as the store means the two cannot be separated."""
+    return os.path.join(os.path.dirname(hermes_store(home)), ".agent-index-install")
+
+
 def from_hermes(days, home=None, state_path=None):
     """Hermes' own store, which agentsview indexes but reports as all zeros.
 
@@ -441,14 +477,7 @@ def from_hermes(days, home=None, state_path=None):
     # Told where to look, or guessing. The difference decides what an absent
     # store MEANS, so it is carried rather than inferred later.
     configured = bool(home or os.environ.get("HERMES_HOME"))
-    if home:
-        homes = [home]
-    elif os.environ.get("HERMES_HOME"):
-        homes = [os.environ["HERMES_HOME"]]
-    else:
-        homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
-    db = next((c for c in (os.path.join(h, "state.db") for h in homes)
-               if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
+    db = hermes_store(home)
     legacy_lost = False
     # The store is resolved BEFORE the ledger moves anywhere: a wrong or unset
     # HERMES_HOME would otherwise move the only copy into a directory that holds
@@ -718,20 +747,39 @@ def register(agent, argv):
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
-    # Re-registering is how a compromised install recovers, so it says which
-    # install it IS. Absent, the Index makes a new one and hands it back.
+    # WHICH install is minting, in the three situations there are.
+    #
+    #  - We have an id: say it. Re-registering is how a compromised install
+    #    recovers, and the replacement key has to keep this install's rows.
+    #  - No id but a key on disk: this install has been reporting WITHOUT one,
+    #    so its rows are in the unnamed bucket the Index keys as ''. Claiming a
+    #    new id here would strand every one of them. Say nothing, and the Index
+    #    keeps this key unnamed too.
+    #  - Neither: a first install, which names ITSELF. The Index stores what it
+    #    is told and invents nothing, so two fresh installs under one owner are
+    #    only distinguishable because each brought its own id.
+    mine = install_id()
     mint = {"label": agent}
-    if install_id():
-        mint["install_id"] = install_id()
+    if mine:
+        mint["install_id"] = mine
+    elif not os.path.exists(TOKEN_PATH):
+        mint["install_id"] = secrets.token_hex(16)
     code, key_out = _post(API + "/v1/keys", mint, assertion)
+    minted_install = str(key_out.get("install_id", ""))
+    # The WHOLE response, before anything is written. A key stored against an
+    # install we did not record is the split this file exists to prevent, and
+    # writing it first is what makes that unrecoverable.
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
         sys.exit("  key mint returned an unexpected shape")
+    if minted_install != mint.get("install_id", ""):
+        sys.exit(f"  the Index minted against a different install than the one asked for; "
+                 f"refusing to store a key whose usage would land somewhere else")
+    # The install FIRST. Interrupted between the two, an install with no key
+    # fails the next run loudly and re-registers onto the same id; a key with no
+    # install reports for good under an id nothing on disk can ever name again.
+    if minted_install:
+        save_private(install_path(), minted_install)
     save_private(TOKEN_PATH, key_out["key"])
-    # The key first: an install whose id was stored and whose key was not has
-    # no way to report at all, where the reverse merely starts a new install.
-    minted_install = str(key_out.get("install_id", ""))
-    if INSTALL_ID.match(minted_install):
-        save_private(INSTALL_PATH, minted_install)
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on

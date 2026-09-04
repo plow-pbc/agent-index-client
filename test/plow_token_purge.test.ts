@@ -4,7 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY, MINTED_INSTALL } from "./fake-plow-index";
+import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY } from "./fake-plow-index";
 
 // The standalone client is the copy that ships inside a container, so these
 // drive the real script rather than a re-implementation of it.
@@ -67,8 +67,6 @@ function homeWith(token?: string) {
 
 /** The path the client stores its minted Index key at, inside a test HOME. */
 const tokenPath = (home: string) => path.join(home, ".agent-index", "token");
-/** And the install those reports are counted under, which outlives the key. */
-const installPath = (home: string) => path.join(home, ".agent-index", "install");
 
 const PLOW = { PLOW_AGENT_TOKEN: "plow-token-for-this-container" }; // pragma: allowlist secret
 const NO_PLOW = { PLOW_AGENT_TOKEN: undefined };
@@ -465,44 +463,67 @@ test("a report prefers the stored key even while a Plow token is exported", asyn
   }
 });
 
-test("a re-mint says which install it is, so a rotated key keeps that install's rows", async () => {
+// The volume a container keeps. The ledger already lives here rather than in
+// the home directory, and the install id has to for the same reason.
+const installPath = (home: string) => path.join(home, ".hermes", ".agent-index-install");
+const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
+  (s.indexHits.filter((h) => h.path === "/v1/keys").at(-1)!.body as { install_id?: string }).install_id;
+
+test("the install id survives a container recreation, because it is not in the home", async () => {
   const s = await standIns();
   try {
     const { home, env } = bootstrapHome(s);
-    // First registration: the client has no install to name, so the Index names
-    // one and it lands beside the key -- private, and by rename like the key.
+    // A first install names ITSELF: the Index stores what it is told and
+    // invents nothing, so two fresh installs under one owner are only ever
+    // distinguishable because each brought its own id.
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    assert.equal(JSON.parse(s.indexHits.at(-1)!.body!).install_id, undefined,
-      "a fresh install has nothing to claim, and must not invent one");
-    assert.equal(fs.readFileSync(installPath(home), "utf8"), MINTED_INSTALL);
+    const mine = fs.readFileSync(installPath(home), "utf8");
+    assert.match(mine, /^[A-Za-z0-9_-]{8,64}$/);
+    assert.equal(askedInstall(s), mine, "and it says which install it is");
     assert.equal(fs.statSync(installPath(home)).mode & 0o777, 0o600);
 
-    // Recovery after a compromised key: register again. Keyed on the credential
-    // the replacement reads as a SECOND install, and its next cumulative
-    // same-day report lands beside the old rows rather than on them -- the day
-    // counted twice. Naming the install is what stops that.
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    assert.equal(JSON.parse(s.indexHits.at(-1)!.body!).install_id, MINTED_INSTALL,
-      "the second mint claims the install the first one was given");
-    assert.equal(fs.readFileSync(installPath(home), "utf8"), MINTED_INSTALL,
-      "and the id the Index echoes back is still the one on disk");
+    // Recreated: same data volume, brand new home. Kept in the home, the id
+    // would be gone here and this install would mint a second one and strand
+    // every row it has written.
+    const recreated = fs.mkdtempSync(path.join(os.tmpdir(), "aic-recreated-"));
+    fs.cpSync(path.join(home, ".hermes"), path.join(recreated, ".hermes"), { recursive: true });
+    stubAgentsView(recreated, "echo '[]'");
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], recreated, env)).code, 0);
+    assert.equal(askedInstall(s), mine, "the recreated container is the same install");
   } finally {
     await s.close();
   }
 });
 
-test("a corrupted install file is dropped rather than sent", async () => {
+test("an install with a key and no id stays in the unnamed bucket", async () => {
+  const s = await standIns();
+  try {
+    const { home, env } = bootstrapHome(s);
+    // Every install that predates install ids: it has a key, it has been
+    // reporting, and its rows are in the '' bucket the server keys unnamed
+    // installs into. Claiming an id on re-registration would strand all of
+    // them, so it claims nothing and the Index keeps this key unnamed too.
+    fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
+    fs.writeFileSync(tokenPath(home), MINTED_KEY);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    assert.equal(askedInstall(s), undefined, "a legacy install must not name itself");
+    assert.ok(!fs.existsSync(installPath(home)), "and must not start holding an id it never reported under");
+  } finally {
+    await s.close();
+  }
+});
+
+test("an id we cannot read stops the run instead of quietly becoming a new install", async () => {
   const s = await standIns();
   try {
     const { home, env } = bootstrapHome(s);
     fs.mkdirSync(path.dirname(installPath(home)), { recursive: true });
     fs.writeFileSync(installPath(home), "not a valid install id!!");
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    // Sent, the Index would refuse the shape and mint against a fresh id
-    // anyway; the install would be split either way, and the client would be
-    // holding a value it can never use again. Dropping it re-bootstraps.
-    assert.equal(JSON.parse(s.indexHits.at(-1)!.body!).install_id, undefined);
-    assert.equal(fs.readFileSync(installPath(home), "utf8"), MINTED_INSTALL);
+    const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
+    assert.notEqual(r.code, 0, "silently starting a second install strands every row this one wrote");
+    assert.match(r.out, new RegExp(installPath(home).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "and says which file to look at");
+    assert.equal(s.indexHits.filter((h) => h.path === "/v1/keys").length, 0, "nothing was minted");
   } finally {
     await s.close();
   }
