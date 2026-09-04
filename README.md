@@ -13,11 +13,16 @@ Three calls, three payloads:
 - `--register` posts the page content you hand it — the agent id, plus whatever
   you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
   `--image` and `--install-url`. All of it is public: it *is* the agent's page.
+  It also sends one id for this install — random, made up here once and kept —
+  so the Index can tell two installs of one agent apart instead of adding them
+  together.
 - A report posts day x model token counts, and nothing else.
 - `--story` posts the one story you wrote — its title, body, tags and images.
 
-**No prompts, no task text, no file paths, no costs.** The only thing read off
-this machine and sent is the token counts; everything else is what you typed.
+**No prompts, no task text, no file paths, no costs.** The only thing *measured*
+off this machine and sent is the token counts. Everything else is what you
+typed, or that one install id — drawn from random bytes, not from anything
+about the machine, so it identifies the install and nothing else.
 
 ## Install
 

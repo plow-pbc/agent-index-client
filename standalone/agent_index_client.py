@@ -20,12 +20,15 @@ Collects from two places, because neither alone covers a real machine:
 
 Sends, per call: --register posts the page content you hand it (agent id,
 name, blurb, repo, runtime, video, images, install-url), all of it public
-because it IS the agent's page; a report posts day x model token counts and
+because it IS the agent's page, plus one id for this install -- random, made
+up here once and kept, so the Index can tell two installs of one agent apart
+instead of adding them together; a report posts day x model token counts and
 nothing else; --story posts the one story you wrote. No prompts, no task
-titles, no file paths, no costs -- the only thing read off this machine and
-sent is the token counts, and everything else is what you typed. Reports use
-the stored Index-issued key; the Plow token is used only once to exchange for
-an assertion during registration.
+titles, no file paths, no costs -- the only thing MEASURED off this machine
+and sent is the token counts. Everything else is what you typed, or that one
+id, which is drawn from random bytes and says nothing about the machine.
+Reports use the stored Index-issued key; the Plow token is used only once to
+exchange for an assertion during registration.
 """
 import datetime
 import fcntl, json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
