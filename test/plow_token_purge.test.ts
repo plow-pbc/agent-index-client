@@ -529,25 +529,6 @@ for (const [start, seed] of [
   });
 }
 
-test("an Index that does not count per-install usage yet still gets a working install", async () => {
-  // Deploy ORDER must not be able to break installs. The server half of this
-  // (agent-index-server#7) merges first, but an Index that predates install
-  // ids echoes no install_id, and refusing to register against one that is
-  // merely older than we are would turn an ordering mistake into broken
-  // containers. It takes the key and claims nothing, which is what this client
-  // did before ids existed.
-  const s = await standIns(0, { echoInstall: false });
-  try {
-    const { home, data, env } = volumeHome(s);
-    const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
-    assert.equal(r.code, 0, r.out);
-    assert.equal(fs.readFileSync(tokenPath(home), "utf8"), MINTED_KEY, "the key is stored and reporting works");
-    assert.ok(!fs.existsSync(installFile(data)), "and no id is claimed that the Index did not store");
-  } finally {
-    await s.close();
-  }
-});
-
 for (const [what, content] of [["zero-byte", ""], ["whitespace-only", "  \n"], ["malformed", "not an id!!"]]) {
   test(`a ${what} install file stops the run instead of quietly becoming a new install`, async () => {
     const s = await standIns();

@@ -803,23 +803,18 @@ def register(agent, argv):
     # writing it first is what makes that unrecoverable.
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
         sys.exit("  key mint returned an unexpected shape")
-    if minted_install and minted_install != mine:
+    # The Index stores the install it is told and echoes it back. Anything else
+    # -- a different id, or none -- is not an Index this client can report
+    # through, and storing the key anyway would put this install's usage
+    # somewhere nothing on disk can name.
+    if minted_install != mine:
         sys.exit(f"  the Index minted against a different install than the one asked for; "
                  f"refusing to store a key whose usage would land somewhere else")
-    # An Index that predates install ids echoes none, and says so by leaving the
-    # field out. It stored no id, so there is no id to keep: take the key and
-    # claim nothing, which is exactly what this client did before ids existed.
-    # The alternative is refusing to register against a server that is merely
-    # older than we are, which turns a deploy ORDER into broken installs.
-    if not minted_install:
-        save_private(TOKEN_PATH, key_out["key"])
-        print("  this Index does not count per-install usage yet; registered without an install id")
-    else:
-        # The install FIRST. Interrupted between the two, an install with no key
-        # fails the next run loudly and re-registers onto the same id; a key
-        # with no install reports for good under an id nothing on disk names.
-        save_private(install_path(), minted_install)
-        save_private(TOKEN_PATH, key_out["key"])
+    # The install FIRST. Interrupted between the two, an install with no key
+    # fails the next run loudly and re-registers onto the same id; a key with no
+    # install reports for good under an id nothing on disk can ever name again.
+    save_private(install_path(), minted_install)
+    save_private(TOKEN_PATH, key_out["key"])
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on

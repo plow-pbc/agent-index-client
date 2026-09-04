@@ -74,10 +74,7 @@ rather than under the key, so replacing a compromised key keeps this install's
 numbers on the rows they were already on instead of starting a second install
 that double-counts the day.
 
-This needs the Index to accept and echo an `install_id` on `POST /v1/keys`
-(`plow-pbc/agent-index-server#7`), which merges first. Against an Index that
-does not, registration still works and simply claims no id — deploy order
-cannot break an install.
+This needs an Index that accepts and echoes an `install_id` on `POST /v1/keys`.
 
 An install that predates the file claims an id on its next `--register` and
 keeps it from then on. The days still in its reporting window exist twice for a
