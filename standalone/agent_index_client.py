@@ -722,15 +722,17 @@ def publish_story(agent, argv):
     sys.exit(0 if code == 200 else 1)
 
 
-VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
-               "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--install-url",
-               }
-KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
-               "--title", "--body", "--tag", "--image", "--days", "--dry-run",
-               "--name", "--blurb", "--repo", "--runtime", "--video",
-               "--install-url",
-               "--help", "-h"}
+# Every option declared ONCE, in the set that says whether it takes a value;
+# what is merely "known" is the union of the two. The old pair listed most
+# flags twice, and that is exactly how --story came to be known but not
+# value-taking: a story id or --body starting with a dash was then read as an
+# unknown option and the run refused -- the one failure the value skip below
+# exists to prevent.
+VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
+               "--image", "--name", "--blurb", "--repo", "--runtime",
+               "--video", "--install-url"}
+BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
+KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 
 
 def _unknown_flags(argv):
@@ -1190,6 +1192,12 @@ def self_check():
     assert _unknown_flags(["--dry-run", "--agent", "x"]) == [], "known flags pass"
     assert _unknown_flags(["--body", "-a", "--oops"]) == ["--oops"], \
         "a typo after a skipped value is still caught"
+    # What the two drifting tables used to get wrong. A loop over VALUE_FLAGS
+    # would be tautological -- the skip is keyed on that set -- so this names
+    # the flag whose membership was the bug: --story was known but not
+    # value-taking, so a dash-leading story id was refused as a typo.
+    assert not VALUE_FLAGS & BARE_FLAGS, "a flag either takes a value or it does not"
+    assert _unknown_flags(["--story", "-1 week of work"]) == [], "--story takes a value"
 
     print("self-check OK — merge, flag parsing, and the Hermes delta collector")
 
