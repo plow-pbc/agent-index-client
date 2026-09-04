@@ -172,9 +172,25 @@ The same rule covers agentsview: **installed and broken** stops the run,
 
 Bake the **client**. Never bake the **token**.
 
-Identity comes from `PLOW_AGENT_TOKEN`, which each container already has and
-which is scoped to that container's own agent — so nothing identifying belongs
-in an image layer, and two installs are never mistaken for one.
+`PLOW_AGENT_TOKEN` says which **agent** this is: each container already has one,
+scoped to that container's own agent, so nothing identifying belongs in an image
+layer. It does not say which **install** — one owner can run the same agent
+twice, and both containers hold a token for it. That is what
+`$HERMES_HOME/.agent-index.json` is for, and why it has to outlive the
+container.
+
+The image declares `VOLUME /opt/data` (which is `HERMES_HOME`) so a plain
+`docker run` keeps it. **Mount it by name**, and reuse that name when you
+recreate the container:
+
+```bash
+docker volume create life-data
+docker run -d --name hermes-life -v life-data:/opt/data … your-image
+```
+
+An anonymous volume is a new one on every `docker run`, which loses the install
+exactly as if nothing had been declared: it registers again, is given a new id,
+and its numbers land beside the ones it wrote before rather than on top of them.
 
 A leftover `~/.agent-index/token` from the GitHub era is deleted on first use
 rather than sent: nothing can exchange it any more, and a GitHub bearer must

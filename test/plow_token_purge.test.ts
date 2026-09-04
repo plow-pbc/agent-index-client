@@ -206,6 +206,15 @@ test("the image ships the client this repo builds", () => {
   assert.match(dockerfile, /COPY[^\n]*agent_index_client\.py \/usr\/local\/bin\/agent-index-client/,
     "the image must install this client, under the name the reporter service execs");
   assert.doesNotMatch(dockerfile, /COPY[^\n]*hermes_client\.py/, "and not the tokenmaxxing fork");
+
+  // And it keeps what a recreated container must not lose. HERMES_HOME holds
+  // the usage ledger and this install's identity; inside the writable layer,
+  // a recreated container registers as a stranger, is given a new install id,
+  // and its numbers arrive beside the ones it wrote instead of on top of them.
+  const home = dockerfile.match(/ENV HERMES_HOME=(\S+)/)?.[1];
+  assert.ok(home, "the image must say where Hermes keeps its state");
+  assert.match(dockerfile, new RegExp(`VOLUME ${home}\\b`),
+    `${home} holds the install id, so the image has to declare it as a volume`);
 });
 
 /** Install a stand-in agentsview in a home, running `body`.

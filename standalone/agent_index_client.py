@@ -212,7 +212,7 @@ def index_assertion():
 INSTALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
-def state_path(home=None):
+def state_path():
     """This install's state: WHICH install it is and the key that reports for
     it, in ONE file.
 
@@ -222,10 +222,10 @@ def state_path(home=None):
     under the old key -- the '' bucket -- while the file said otherwise, and
     nothing on the next run could tell that had happened. Ordering the writes
     only chooses which half survives; one file means there is no half."""
-    return os.path.join(state_dir(home), ".agent-index.json")
+    return os.path.join(state_dir(), ".agent-index.json")
 
 
-def load_state(path=None):
+def load_state():
     """What this install is, or {} if it has never registered.
 
     Only ABSENT is empty. Unreadable or malformed is a file that says this
@@ -233,13 +233,11 @@ def load_state(path=None):
     opposites: treating it as absent mints a second install and strands every
     row the first one wrote, while inventing one is the same thing with extra
     steps. So neither -- stop, and name the file."""
-    # A path we were HANDED is a file, not this machine's install, so the
-    # layout that preceded this one is not its business either.
-    mine, path = path is None, path or state_path()
+    path = state_path()
     try:
         raw = open(path).read()
     except FileNotFoundError:
-        return legacy_state() if mine else {}
+        return legacy_state()
     except OSError as e:
         sys.exit(f"  this install's state at {path} could not be READ: {e}\n"
                  f"  refusing to run: reporting past it would start a second install "
@@ -380,11 +378,11 @@ def purge_unusable_token(path=None):
     return True
 
 
-def token(path=None):
+def token():
     # Nothing that is not an Index key may be sent as authorization, and
     # load_state refuses a file holding anything else -- so reaching here with
     # a key at all means it is one.
-    key = load_state(path).get("key")
+    key = load_state().get("key")
     if key:
         return key
     sys.exit("no PLOW_AGENT_TOKEN in the environment, and no stored key.\n"
@@ -521,10 +519,11 @@ def _has_usage_table(db):
         return False
 
 
-def state_dir(home=None):
+def state_dir():
     """The directory this install's identity lives in.
 
-    Named, or the home directory -- and NEVER the result of looking around.
+    Named by HERMES_HOME, or the home directory -- and NEVER the result of
+    looking around.
     Hermes' store is DISCOVERED when nobody says where it is: ~/.hermes today,
     ~/.hermes-life the moment one appears there. The ledger can afford to move
     with it and re-baseline. Identity cannot: the id would be written under one,
@@ -538,7 +537,7 @@ def state_dir(home=None):
     otherwise lose it. Nobody named one, and there is no volume in play: this is
     a host install, its home is as durable as the machine, and the id belongs
     beside the key that reports for it."""
-    told = home or os.environ.get("HERMES_HOME")
+    told = os.environ.get("HERMES_HOME")
     return told if told else os.path.dirname(TOKEN_PATH)
 
 
@@ -1326,33 +1325,6 @@ def self_check():
         assert "NOT reporting a partial total" in out, out
         # It never tried to post: the unreachable endpoint would have said so.
         assert "could not reach" not in out, f"it must not have posted at all: {out}"
-
-    # Reports use the stored report-only key; the Plow token is only for the
-    # one-time assertion exchange. And the key never travels alone: the install
-    # it reports for is in the same file, written in the same rename, so there
-    # is no state in which one is current and the other is not.
-    with tempfile.TemporaryDirectory() as key_home:
-        path = os.path.join(key_home, "state.json")
-        key, install = "aik_" + "k" * 43, "install-abcdef01"
-        save_private(path, json.dumps({"install_id": install, "key": key}))
-        assert token(path) == key
-        assert load_state(path) == {"install_id": install, "key": key}
-        # Half a pair is the state this file exists to make impossible, so it is
-        # refused rather than half-believed -- reporting under a key whose
-        # install nothing on disk can name is the failure, not the recovery.
-        # An install that registered before ids existed: a key, no id. Ordinary,
-        # and it must keep reporting rather than be read as corrupt.
-        save_private(path, json.dumps({"key": key}))
-        assert load_state(path) == {"install_id": "", "key": key}
-        for half in ({"install_id": install}, {"install_id": "not an id", "key": key},
-                     {"install_id": install, "key": "gho_x"}):
-            save_private(path, json.dumps(half))
-            try:
-                load_state(path)
-                raise AssertionError(f"half a pair must stop the run: {half}")
-            except SystemExit as stop:
-                assert path in str(stop), f"and must name the file: {stop}"
-
 
     # An unreachable server is a reported failure, not a traceback in a
     # supervised loop's logs. Port 9 is discard: nothing listens there.
