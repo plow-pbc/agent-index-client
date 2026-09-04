@@ -667,6 +667,12 @@ def register(agent, argv):
         "name": opt("--name"), "blurb": opt("--blurb"), "repo": opt("--repo"),
         "runtime": opt("--runtime"),
     }.items() if v}
+    # NOT filtered by `if v` like the rest: "" is how a publisher takes a bad
+    # link off a page anyone can read, and dropping it here would leave them
+    # with no way to. The server treats "" as a clear and an absent field as
+    # "leave what is on record alone".
+    if opt("--install-url") is not None:
+        body["install_url"] = opt("--install-url")
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
         # not a URL — passing a URL renders a broken player on a public page.
@@ -718,10 +724,12 @@ def publish_story(agent, argv):
 
 VALUE_FLAGS = {"--agent", "--days", "--title", "--body", "--tag", "--image",
                "--name", "--blurb", "--repo", "--runtime", "--video",
+               "--install-url",
                }
 KNOWN_FLAGS = {"--self-check", "--register", "--agent", "--tags", "--story",
                "--title", "--body", "--tag", "--image", "--days", "--dry-run",
                "--name", "--blurb", "--repo", "--runtime", "--video",
+               "--install-url",
                "--help", "-h"}
 
 

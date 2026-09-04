@@ -67,6 +67,11 @@ the Index resolves the creator from Plow.
 `--video` takes a YouTube **video id**, not a URL — the page embeds
 `youtube-nocookie.com/embed/<id>`.
 
+`--install-url` is the tutorial that shows people how to install this agent,
+step by step. Community agents have no cloud deploy path, so it is what their
+Index page links to instead; an https link only, and `--install-url ""` takes
+one back off the page.
+
 
 ```bash
 # Report usage. Run it on whatever schedule you like.
