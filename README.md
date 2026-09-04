@@ -76,9 +76,13 @@ starting a second install that double-counts the day.
 One file rather than two, because the two must never disagree: written
 separately, a crash between the writes left the id claiming a named install
 while the key on disk was still the unnamed one it replaced, and every report
-after that went to the wrong place while the files said otherwise. An install
-that predates this file is carried into it on the next run, and
-`~/.agent-index/token` is removed once its key is safely inside.
+after that went to the wrong place while the files said otherwise.
+
+An install that predates this file is carried into it on its next run — its key
+moves in, it keeps reporting unnamed until it names itself, and
+`~/.agent-index/token` is removed once the key is safely inside. If that removal
+cannot happen the run stops and says so, rather than leaving a second live copy
+of the credential on a disk nothing will look at again.
 
 This needs an Index that accepts and echoes an `install_id` on `POST /v1/keys`.
 

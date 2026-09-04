@@ -493,6 +493,15 @@ function volumeHome(s: { plow: string; index: string }, volume?: string) {
 
 /** The one file: which install this is, and the key that reports for it. */
 const stateFile = (dir: string) => path.join(dir, ".agent-index.json");
+/** A Hermes store with nothing in it: enough for the collector to read, which
+ *  is all these cases need. One schema, because two drift. */
+function createEmptyHermesStore(dir: string) {
+  fs.mkdirSync(dir, { recursive: true });
+  const db = new Database(path.join(dir, "state.db"));
+  db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
+          " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
+  db.close();
+}
 const stateOf = (dir: string) =>
   JSON.parse(fs.readFileSync(stateFile(dir), "utf8")) as { install_id?: string; key?: string };
 const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
@@ -580,10 +589,7 @@ test("a crash during a legacy re-registration leaves the old pair or the new one
     fs.writeFileSync(stateFile(data), JSON.stringify({ key: OLD_KEY }));
     // A real store on the volume, so the reporting run below is the ordinary
     // path rather than a configured-and-missing failure.
-    const store = new Database(path.join(data, "state.db"));
-    store.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
-               " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
-    store.close();
+    createEmptyHermesStore(data);
 
     // The crash: the write that replaces them dies after its temp file exists
     // and before the rename. That is the only window there is now, and what is
@@ -610,6 +616,28 @@ test("a crash during a legacy re-registration leaves the old pair or the new one
   }
 });
 
+test("a superseded credential that could not be removed is retried, not forgotten", async () => {
+  const s = await standIns();
+  try {
+    // Removed only on the run that migrates, a removal that failed left a
+    // second live copy of the key on disk for good: every later run reads the
+    // canonical file, returns early, and never looks at the old one again.
+    const { home, data, env } = volumeHome(s);
+    const OLD_KEY = "aik_" + "o".repeat(43);          // pragma: allowlist secret
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(stateFile(data), JSON.stringify({ install_id: "install-abcdef01", key: OLD_KEY }));
+    fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
+    fs.writeFileSync(tokenPath(home), OLD_KEY);       // the file a failed cleanup left behind
+
+    createEmptyHermesStore(data);
+    assert.equal((await clientAsync(["--agent", "purge-test"], home, env)).code, 0);
+    assert.ok(!fs.existsSync(tokenPath(home)),
+      "a later run retires it, because that run is the only one still looking");
+  } finally {
+    await s.close();
+  }
+});
+
 test("the install id does not move when a Hermes store appears later", async () => {
   const s = await standIns();
   try {
@@ -625,12 +653,7 @@ test("the install id does not move when a Hermes store appears later", async () 
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
     const mine = String(askedInstall(s));
 
-    const life = path.join(home, ".hermes-life");
-    fs.mkdirSync(life, { recursive: true });
-    const db = new Database(path.join(life, "state.db"));
-    db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
-            " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
-    db.close();
+    createEmptyHermesStore(path.join(home, ".hermes-life"));
 
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
     assert.equal(askedInstall(s), mine, "the store moved; the install did not");
