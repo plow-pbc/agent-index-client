@@ -15,7 +15,7 @@ export const MINTED_KEY = "aik_" + "m".repeat(43);           // pragma: allowlis
 /** The unnamed install: what a key gets when its holder did not say which
  *  install it is. The real Index stores '' and keeps that key on the rows an
  *  install with no id of its own has always written. */
-export const UNNAMED_INSTALL = "";
+const UNNAMED_INSTALL = "";
 
 export type Hit = { method: string; path: string; bearer: string; body?: unknown };
 
@@ -65,7 +65,7 @@ export type StandIns = {
  * permissive stand-in turns the bug this flow exists to prevent -- the Plow
  * token travelling to the Index -- into a green test.
  */
-export async function standIns(): Promise<StandIns> {
+export async function standIns(mintDelayMs = 0): Promise<StandIns> {
   const plowHits: Hit[] = [];
   const indexHits: Hit[] = [];
 
@@ -94,9 +94,14 @@ export async function standIns(): Promise<StandIns> {
       // Index generates no id of its own, so a stand-in that invented one
       // would hide a client that stopped sending its install.
       const asked = String((body as { install_id?: unknown } | undefined)?.install_id || UNNAMED_INSTALL);
-      return path === "/v1/keys"
-        ? json(res, 200, { key: MINTED_KEY, install_id: asked })
-        : json(res, 200, { result: "registered", url: "https://agents.plow.co/purge-test" });
+      if (path !== "/v1/keys") {
+        return json(res, 200, { result: "registered", url: "https://agents.plow.co/purge-test" });
+      }
+      // A mint that holds the line, so a second registration is INSIDE the
+      // first one's while it runs. Without it two processes started together
+      // can still finish one after the other, and a test for what happens when
+      // they overlap would pass without them ever overlapping.
+      return setTimeout(() => json(res, 200, { key: MINTED_KEY, install_id: asked }), mintDelayMs);
     }
     // Everything else is reporting, which may use the minted key and nothing else.
     if (bearer !== `Bearer ${MINTED_KEY}`) {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -463,72 +464,153 @@ test("a report prefers the stored key even while a Plow token is exported", asyn
   }
 });
 
-// The volume a container keeps. The ledger already lives here rather than in
-// the home directory, and the install id has to for the same reason.
-const installPath = (home: string) => path.join(home, ".hermes", ".agent-index-install");
+// ---------------------------------------------------------------------------
+// Which INSTALL is reporting. The Index counts a day's usage under an install
+// rather than under the key that authenticated it, so everything below is
+// about one question: does this container still know which install it is.
+// ---------------------------------------------------------------------------
+
+/** A home plus the volume a container keeps across recreations. The shipped
+ *  image sets HERMES_HOME=/opt/data and mounts it, which is what this is. */
+function volumeHome(s: { plow: string; index: string }, volume?: string) {
+  const home = homeWith();
+  stubAgentsView(home, "echo '[]'");
+  const data = volume || fs.mkdtempSync(path.join(os.tmpdir(), "aic-volume-"));
+  return {
+    home, data,
+    env: {
+      PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+      HERMES_HOME: data,
+    } as Record<string, string | undefined>,
+  };
+}
+
+const installFile = (data: string) => path.join(data, ".agent-index-install");
 const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
   (s.indexHits.filter((h) => h.path === "/v1/keys").at(-1)!.body as { install_id?: string }).install_id;
 
-test("the install id survives a container recreation, because it is not in the home", async () => {
+test("the install id is on the volume, so a recreated container is the same install", async () => {
   const s = await standIns();
   try {
-    const { home, env } = bootstrapHome(s);
-    // A first install names ITSELF: the Index stores what it is told and
-    // invents nothing, so two fresh installs under one owner are only ever
-    // distinguishable because each brought its own id.
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    const mine = fs.readFileSync(installPath(home), "utf8");
-    assert.match(mine, /^[A-Za-z0-9_-]{8,64}$/);
-    assert.equal(askedInstall(s), mine, "and it says which install it is");
-    assert.equal(fs.statSync(installPath(home)).mode & 0o777, 0o600);
+    const first = volumeHome(s);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], first.home, first.env)).code, 0);
+    const mine = fs.readFileSync(installFile(first.data), "utf8");
+    assert.match(mine, /^[A-Za-z0-9_-]{8,64}$/, "a first install names itself");
+    assert.equal(askedInstall(s), mine, "and says which install it is");
+    assert.equal(fs.statSync(installFile(first.data)).mode & 0o777, 0o600);
 
-    // Recreated: same data volume, brand new home. Kept in the home, the id
+    // Recreated: same volume, brand new home, no token. Kept in the home the id
     // would be gone here and this install would mint a second one and strand
     // every row it has written.
-    const recreated = fs.mkdtempSync(path.join(os.tmpdir(), "aic-recreated-"));
-    fs.cpSync(path.join(home, ".hermes"), path.join(recreated, ".hermes"), { recursive: true });
-    stubAgentsView(recreated, "echo '[]'");
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], recreated, env)).code, 0);
+    const again = volumeHome(s, first.data);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], again.home, again.env)).code, 0);
     assert.equal(askedInstall(s), mine, "the recreated container is the same install");
   } finally {
     await s.close();
   }
 });
 
-test("an install that has been reporting without an id names itself, once", async () => {
-  const s = await standIns();
-  try {
-    const { home, env } = bootstrapHome(s);
-    // Every install that predates install ids shares ONE unnamed bucket on the
-    // Index. Staying there to protect the rows already in it would leave an
-    // owner's two old installs overwriting each other permanently -- this bug,
-    // made forever, for exactly the installs that hit it first. So it claims an
-    // id, and the same one from then on.
+// Two shapes of an install that predates install ids: one recreated with only
+// its data volume (the ledger survived, the home-scoped token did not), one
+// still holding its key. Neither has an id, and the rule is the same for both.
+for (const [shape, seed] of [
+  ["a ledger and no token", (home: string, data: string) =>
+    fs.writeFileSync(path.join(data, ".agent-index-state.json"), '{"version":1,"snapshot":{},"daily":{}}')],
+  ["a token and no ledger", (home: string, _data: string) => {
     fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
     fs.writeFileSync(tokenPath(home), MINTED_KEY);
+  }],
+] as [string, (home: string, data: string) => void][]) {
+  test(`an install with ${shape} names itself once, and never again`, async () => {
+    const s = await standIns();
+    try {
+      // Every install that predates install ids shares ONE unnamed bucket on
+      // the Index, so staying there would leave an owner's two old installs
+      // overwriting each other permanently -- this bug, made forever, for
+      // exactly the installs that hit it first. It claims an id. What it must
+      // never do is claim a DIFFERENT one each time it comes back.
+      const one = volumeHome(s);
+      seed(one.home, one.data);
+      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home, one.env)).code, 0);
+      const claimed = String(askedInstall(s));
+      assert.match(claimed, /^[A-Za-z0-9_-]{8,64}$/);
+      assert.equal(fs.readFileSync(installFile(one.data), "utf8"), claimed);
+
+      const two = volumeHome(s, one.data);
+      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], two.home, two.env)).code, 0);
+      assert.equal(askedInstall(s), claimed, "a legacy install names itself ONCE, not once per run");
+    } finally {
+      await s.close();
+    }
+  });
+}
+
+for (const [what, content] of [["zero-byte", ""], ["whitespace-only", "  \n"], ["malformed", "not an id!!"]]) {
+  test(`a ${what} install file stops the run instead of quietly becoming a new install`, async () => {
+    const s = await standIns();
+    try {
+      const { home, data, env } = volumeHome(s);
+      fs.writeFileSync(installFile(data), content);
+      const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
+      // The file EXISTS, so this install has an id. Reading that as "never had
+      // one" mints a second install and strands every row the first one wrote.
+      assert.notEqual(r.code, 0, `a ${what} id must not read as no id at all`);
+      assert.match(r.out, new RegExp(installFile(data).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        "and says which file to look at");
+      assert.equal(s.indexHits.filter((h) => h.path === "/v1/keys").length, 0, "nothing was minted");
+    } finally {
+      await s.close();
+    }
+  });
+}
+
+test("the install id does not move when a Hermes store appears later", async () => {
+  const s = await standIns();
+  try {
+    // Nobody says where Hermes lives, so the store is DISCOVERED: ~/.hermes
+    // today, ~/.hermes-life the moment one appears there. Hang identity off
+    // that discovery and the id is written under one and read from the other --
+    // the install arrives at its next registration with no id, mints a second
+    // one, and strands everything the first wrote.
+    const home = homeWith();
+    stubAgentsView(home, "echo '[]'");
+    const env = { PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+                  HERMES_HOME: undefined } as Record<string, string | undefined>;
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    const claimed = askedInstall(s);
-    assert.match(String(claimed), /^[A-Za-z0-9_-]{8,64}$/, "a legacy install names itself");
-    assert.equal(fs.readFileSync(installPath(home), "utf8"), claimed);
+    const mine = String(askedInstall(s));
+
+    const life = path.join(home, ".hermes-life");
+    fs.mkdirSync(life, { recursive: true });
+    const db = new Database(path.join(life, "state.db"));
+    db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
+            " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
+    db.close();
 
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    assert.equal(askedInstall(s), claimed, "and never renames itself afterwards");
+    assert.equal(askedInstall(s), mine, "the store moved; the install did not");
   } finally {
     await s.close();
   }
 });
 
-test("an id we cannot read stops the run instead of quietly becoming a new install", async () => {
-  const s = await standIns();
+test("two registrations at once agree on one install", async () => {
+  // The mint holds the line, so the second registration is genuinely inside the
+  // first. Unserialised, both read "no id", both generate their own, and their
+  // renames interleave: the id file holds one process's install and the token
+  // file the other process's key.
+  const s = await standIns(400);
   try {
-    const { home, env } = bootstrapHome(s);
-    fs.mkdirSync(path.dirname(installPath(home)), { recursive: true });
-    fs.writeFileSync(installPath(home), "not a valid install id!!");
-    const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
-    assert.notEqual(r.code, 0, "silently starting a second install strands every row this one wrote");
-    assert.match(r.out, new RegExp(installPath(home).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-      "and says which file to look at");
-    assert.equal(s.indexHits.filter((h) => h.path === "/v1/keys").length, 0, "nothing was minted");
+    const { home, data, env } = volumeHome(s);
+    const both = await Promise.all([
+      clientAsync(["--register", "--agent", "purge-test"], home, env),
+      clientAsync(["--register", "--agent", "purge-test"], home, env),
+    ]);
+    for (const r of both) assert.equal(r.code, 0, r.out);
+    const mints = s.indexHits.filter((h) => h.path === "/v1/keys")
+      .map((h) => (h.body as { install_id?: string }).install_id);
+    assert.equal(mints.length, 2);
+    assert.equal(mints[0], mints[1], "the second reads the id the first wrote, and mints for that install");
+    assert.equal(fs.readFileSync(installFile(data), "utf8"), mints[0], "which is the id on disk");
   } finally {
     await s.close();
   }

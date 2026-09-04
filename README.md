@@ -57,10 +57,14 @@ A fresh install exchanges its Plow token for a short-lived assertion, then the
 Index mints its report-only key. A GitHub bearer left in that file is a
 different matter and is deleted on the next run rather than sent.
 
-This install's id lives beside the Hermes store, at
-`<HERMES_HOME>/.agent-index-install`, on the same volume as the usage ledger and
-for the same reason: a container recreated with its data volume and a fresh home
-must still be the same install. The Index counts a day's usage under that id
+This install's id lives at `<HERMES_HOME>/.agent-index-install` when a Hermes
+home is named — which is what the shipped image does, on the volume the
+container keeps — so a container recreated with its data volume and a fresh home
+is still the same install. With no Hermes home named there is no volume in play,
+it is a host install, and the id sits beside the key at
+`~/.agent-index/install`. Either way the location is fixed by what you told it,
+never by which store it happens to find, so a store appearing later cannot move
+it. The Index counts a day's usage under that id
 rather than under the key, so replacing a compromised key keeps this install's
 numbers on the rows they were already on instead of starting a second install
 that double-counts the day.

@@ -28,7 +28,7 @@ the stored Index-issued key; the Plow token is used only once to exchange for
 an assertion during registration.
 """
 import datetime
-import json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import fcntl, json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 # Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
@@ -227,7 +227,11 @@ def install_id(path=None):
         sys.exit(f"  this install's id at {path} could not be READ: {e}\n"
                  f"  refusing to run: reporting past it would start a second install "
                  f"and strand the usage this one has already published")
-    if stored and not INSTALL_ID.match(stored):
+    # No `stored and`: a zero-byte or whitespace-only file is a file that EXISTS,
+    # which says this install has an id, and reading it as "never had one" mints
+    # a second install and strands the first one's rows -- the exact outcome the
+    # loud path above exists to prevent, reached through the quiet one.
+    if not INSTALL_ID.match(stored):
         sys.exit(f"  this install's id at {path} is not a usable id\n"
                  f"  refusing to run: minting against a new one would strand the usage "
                  f"this install has already published. Delete the file to start over "
@@ -452,16 +456,29 @@ def hermes_store(home=None):
                  if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
 
 
-def install_path(home=None):
-    """Where this install's id lives: beside the store and the ledger, on the
-    volume a container keeps.
+def state_dir(home=None):
+    """The directory this install's identity lives in.
 
-    NOT in the home directory. A shipped container is recreated with its data
-    volume intact and a FRESH home -- that is what the ledger already moved out
-    of the home to survive -- so an install id kept there is lost on every
-    recreation, and the install mints a new id and strands the rows it has
-    been writing. Same volume as the store means the two cannot be separated."""
-    return os.path.join(os.path.dirname(hermes_store(home)), ".agent-index-install")
+    Named, or the home directory -- and NEVER the result of looking around.
+    Hermes' store is DISCOVERED when nobody says where it is: ~/.hermes today,
+    ~/.hermes-life the moment one appears there. The ledger can afford to move
+    with it and re-baseline. Identity cannot: the id would be written under one,
+    read from the other, and the install would arrive at its next registration
+    with no id and mint a second one, stranding everything the first wrote.
+
+    So it is one question with one answer that cannot change under it. Somebody
+    named a Hermes home -- which is what the shipped image does, HERMES_HOME=
+    /opt/data on the volume the container keeps -- and the id belongs there, on
+    the volume, because a recreated container has a fresh HOME and would
+    otherwise lose it. Nobody named one, and there is no volume in play: this is
+    a host install, its home is as durable as the machine, and the id belongs
+    beside the key that reports for it."""
+    told = home or os.environ.get("HERMES_HOME")
+    return told if told else os.path.dirname(TOKEN_PATH)
+
+
+def install_path(home=None):
+    return os.path.join(state_dir(home), ".agent-index-install")
 
 
 def from_hermes(days, home=None, state_path=None):
@@ -742,6 +759,23 @@ def register(agent, argv):
     images = [argv[i + 1] for i, a in enumerate(argv) if a == "--image"]
     if images:
         body["images"] = images
+
+    # ONE registration at a time on this volume.
+    #
+    # Two overlapping ones each read "no id", each generate their own, and their
+    # two renames interleave: the id file ends up holding one process's install
+    # and the token file the other process's key, so this install reports under
+    # an id nothing on disk names and moves buckets again at the next rotation.
+    # Serialised, the second one reads the id the first wrote and mints a key
+    # for that same install, which is the right answer and not merely a safe
+    # one. Held for the whole of registration -- selection, mint and both
+    # writes -- because every one of those steps is part of the same decision.
+    #
+    # Released when this process ends, which is the only thing that ends a
+    # registration: it either wrote both files or exited.
+    os.makedirs(state_dir(), exist_ok=True)
+    lock = open(os.path.join(state_dir(), ".agent-index-register.lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
 
     assertion = index_assertion()
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
