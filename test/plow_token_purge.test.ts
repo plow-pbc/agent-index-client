@@ -100,7 +100,12 @@ for (const c of CASES) {
     } else {
       assert.doesNotMatch(out, /removed a stored credential/);
       if (c.stored !== undefined) {
-        assert.equal(fs.readFileSync(tokenFile, "utf8"), c.stored, "only GitHub bearers are legacy");
+        // Ours, so it is kept -- and moved into the one file that now holds an
+        // install and its key together, which is what every install that
+        // registered before that file existed does on its next run.
+        assert.equal(JSON.parse(fs.readFileSync(path.join(home, ".agent-index", ".agent-index.json"), "utf8")).key,
+          c.stored, "only GitHub bearers are legacy");
+        assert.ok(!fs.existsSync(tokenFile), "and the file it used to live in is gone");
       }
     }
   });
@@ -382,9 +387,10 @@ test("registration trades the Plow token for an assertion, and stores what the I
 
     // What lands on disk is the minted key, privately, by rename: a reader
     // that opens the file mid-write must never see a half-written credential.
-    assert.equal(fs.readFileSync(tokenPath(home), "utf8"), MINTED_KEY);
-    assert.equal(fs.statSync(tokenPath(home)).mode & 0o777, 0o600, "the key is not world-readable");
-    assert.ok(!fs.existsSync(tokenPath(home) + ".new"), "no temp file survives the write");
+    const state = path.join(home, ".agent-index", ".agent-index.json");
+    assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).key, MINTED_KEY);
+    assert.equal(fs.statSync(state).mode & 0o777, 0o600, "the key is not world-readable");
+    assert.ok(!fs.existsSync(state + ".new"), "no temp file survives the write");
   } finally {
     await s.close();
   }
@@ -485,7 +491,10 @@ function volumeHome(s: { plow: string; index: string }, volume?: string) {
   };
 }
 
-const installFile = (data: string) => path.join(data, ".agent-index-install");
+/** The one file: which install this is, and the key that reports for it. */
+const stateFile = (dir: string) => path.join(dir, ".agent-index.json");
+const stateOf = (dir: string) =>
+  JSON.parse(fs.readFileSync(stateFile(dir), "utf8")) as { install_id?: string; key?: string };
 const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
   (s.indexHits.filter((h) => h.path === "/v1/keys").at(-1)!.body as { install_id?: string }).install_id;
 
@@ -497,9 +506,9 @@ for (const [start, seed] of [
   ["a first install", () => {}],
   ["an install with a ledger and no token", (home: string, data: string) =>
     fs.writeFileSync(path.join(data, ".agent-index-state.json"), '{"version":1,"snapshot":{},"daily":{}}')],
-  ["an install with a token and no ledger", (home: string) => {
+  ["an install that registered before install ids", (home: string) => {
     fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
-    fs.writeFileSync(tokenPath(home), MINTED_KEY);
+    fs.writeFileSync(tokenPath(home), MINTED_KEY);      // the file this used to keep
   }],
 ] as [string, (home: string, data: string) => void][]) {
   test(`${start} names itself once, and is still that install after a recreation`, async () => {
@@ -514,8 +523,9 @@ for (const [start, seed] of [
       assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home, one.env)).code, 0);
       const claimed = String(askedInstall(s));
       assert.match(claimed, /^[A-Za-z0-9_-]{8,64}$/);
-      assert.equal(fs.readFileSync(installFile(one.data), "utf8"), claimed);
-      assert.equal(fs.statSync(installFile(one.data)).mode & 0o777, 0o600, "not world-readable");
+      assert.deepEqual(stateOf(one.data), { install_id: claimed, key: MINTED_KEY },
+        "the install and the key that reports for it, in one file");
+      assert.equal(fs.statSync(stateFile(one.data)).mode & 0o777, 0o600, "not world-readable");
 
       // Recreated: same volume, brand new home, no token. Kept in the home the
       // id would be gone here, and this install would mint a second one and
@@ -529,17 +539,24 @@ for (const [start, seed] of [
   });
 }
 
-for (const [what, content] of [["zero-byte", ""], ["whitespace-only", "  \n"], ["malformed", "not an id!!"]]) {
-  test(`a ${what} install file stops the run instead of quietly becoming a new install`, async () => {
+// State a file can be in that is not a state to carry on from. Each one used to
+// have a quiet reading -- "this install has no id" -- and each quiet reading
+// mints a second install and strands every row the first one wrote.
+for (const [what, content] of [
+  ["unparseable", "{not json at all"],
+  ["holding an id it cannot use", JSON.stringify({ install_id: "not an id!!", key: MINTED_KEY })],
+  ["holding an id and no key", JSON.stringify({ install_id: "install-abcdef01" })],
+  ["holding a credential that is not ours", JSON.stringify({ install_id: "install-abcdef01", key: "gho_x" })],
+]) {
+  test(`a state file ${what} stops the run instead of quietly becoming a new install`, async () => {
     const s = await standIns();
     try {
       const { home, data, env } = volumeHome(s);
-      fs.writeFileSync(installFile(data), content);
+      fs.mkdirSync(data, { recursive: true });
+      fs.writeFileSync(stateFile(data), content);
       const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
-      // The file EXISTS, so this install has an id. Reading that as "never had
-      // one" mints a second install and strands every row the first one wrote.
-      assert.notEqual(r.code, 0, `a ${what} id must not read as no id at all`);
-      assert.match(r.out, new RegExp(installFile(data).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      assert.notEqual(r.code, 0, "a state we cannot read is not a state we may register over");
+      assert.match(r.out, new RegExp(stateFile(data).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
         "and says which file to look at");
       assert.equal(s.indexHits.filter((h) => h.path === "/v1/keys").length, 0, "nothing was minted");
     } finally {
@@ -547,6 +564,51 @@ for (const [what, content] of [["zero-byte", ""], ["whitespace-only", "  \n"], [
     }
   });
 }
+
+test("a crash during a legacy re-registration leaves the old pair or the new one, never a mix", async () => {
+  const s = await standIns();
+  try {
+    // The install this is about: registered before ids existed, so it holds a
+    // key and no id, and its rows are in the Index's unnamed bucket. Naming it
+    // replaces BOTH -- and written as two files, a crash in between left the id
+    // claiming a named install while the key on disk was still the unnamed one,
+    // so every later report went to the old bucket while the file said
+    // otherwise, and nothing on the next run could tell.
+    const { home, data, env } = volumeHome(s);
+    const OLD_KEY = "aik_" + "o".repeat(43);          // pragma: allowlist secret
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(stateFile(data), JSON.stringify({ key: OLD_KEY }));
+    // A real store on the volume, so the reporting run below is the ordinary
+    // path rather than a configured-and-missing failure.
+    const store = new Database(path.join(data, "state.db"));
+    store.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
+               " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
+    store.close();
+
+    // The crash: the write that replaces them dies after its temp file exists
+    // and before the rename. That is the only window there is now, and what is
+    // in the temp file is deliberately a mismatched pair.
+    fs.writeFileSync(stateFile(data) + ".new",
+      JSON.stringify({ install_id: "install-halfway", key: "aik_" + "n".repeat(43) })); // pragma: allowlist secret
+
+    const before = stateOf(data);
+    assert.deepEqual(before, { key: OLD_KEY }, "the old pair, untouched by a write that did not land");
+
+    // The next run reads the state, not the wreckage beside it, and reports
+    // with the key that is actually current.
+    assert.equal((await clientAsync(["--agent", "purge-test"], home, env)).code, 0);
+    assert.equal(s.indexHits.filter((h) => h.path.startsWith("/v1/usage")).at(-1)!.bearer,
+      `Bearer ${OLD_KEY}`, "the key in the state file is the one that reports");
+
+    // And when the replacement does land, it lands whole.
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    const after = stateOf(data);
+    assert.match(String(after.install_id), /^[A-Za-z0-9_-]{8,64}$/);
+    assert.equal(after.key, MINTED_KEY, "the id and the key that replaced it, together");
+  } finally {
+    await s.close();
+  }
+});
 
 test("the install id does not move when a Hermes store appears later", async () => {
   const s = await standIns();
@@ -594,7 +656,7 @@ test("two registrations at once agree on one install", async () => {
       .map((h) => (h.body as { install_id?: string }).install_id);
     assert.equal(mints.length, 2);
     assert.equal(mints[0], mints[1], "the second reads the id the first wrote, and mints for that install");
-    assert.equal(fs.readFileSync(installFile(data), "utf8"), mints[0], "which is the id on disk");
+    assert.equal(stateOf(data).install_id, mints[0], "which is the id on disk");
   } finally {
     await s.close();
   }

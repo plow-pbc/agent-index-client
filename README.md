@@ -62,17 +62,23 @@ A fresh install exchanges its Plow token for a short-lived assertion, then the
 Index mints its report-only key. A GitHub bearer left in that file is a
 different matter and is deleted on the next run rather than sent.
 
-This install's id lives at `<HERMES_HOME>/.agent-index-install` when a Hermes
-home is named — which is what the shipped image does, on the volume the
-container keeps — so a container recreated with its data volume and a fresh home
-is still the same install. With no Hermes home named there is no volume in play,
-it is a host install, and the id sits beside the key at
-`~/.agent-index/.agent-index-install`. Either way the location is fixed by what you told it,
-never by which store it happens to find, so a store appearing later cannot move
-it. The Index counts a day's usage under that id
-rather than under the key, so replacing a compromised key keeps this install's
-numbers on the rows they were already on instead of starting a second install
-that double-counts the day.
+This install's identity — which install it is, and the key that reports for it —
+lives in ONE file: `<HERMES_HOME>/.agent-index.json` when a Hermes home is named,
+which is what the shipped image does, on the volume the container keeps, so a
+container recreated with a fresh home is still the same install; and
+`~/.agent-index/.agent-index.json` on a host install, where there is no volume in
+play. Either way the location is fixed by what you told it, never by which store
+it happens to find, so a store appearing later cannot move it. The Index counts a
+day's usage under that id rather than under the key, so replacing a compromised
+key keeps this install's numbers on the rows they were already on instead of
+starting a second install that double-counts the day.
+
+One file rather than two, because the two must never disagree: written
+separately, a crash between the writes left the id claiming a named install
+while the key on disk was still the unnamed one it replaced, and every report
+after that went to the wrong place while the files said otherwise. An install
+that predates this file is carried into it on the next run, and
+`~/.agent-index/token` is removed once its key is safely inside.
 
 This needs an Index that accepts and echoes an `install_id` on `POST /v1/keys`.
 
