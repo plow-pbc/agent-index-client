@@ -65,7 +65,10 @@ export type StandIns = {
  * permissive stand-in turns the bug this flow exists to prevent -- the Plow
  * token travelling to the Index -- into a green test.
  */
-export async function standIns(mintDelayMs = 0): Promise<StandIns> {
+export async function standIns(
+  mintDelayMs = 0,
+  { echoInstall = true }: { echoInstall?: boolean } = {},
+): Promise<StandIns> {
   const plowHits: Hit[] = [];
   const indexHits: Hit[] = [];
 
@@ -101,7 +104,9 @@ export async function standIns(mintDelayMs = 0): Promise<StandIns> {
       // first one's while it runs. Without it two processes started together
       // can still finish one after the other, and a test for what happens when
       // they overlap would pass without them ever overlapping.
-      return setTimeout(() => json(res, 200, { key: MINTED_KEY, install_id: asked }), mintDelayMs);
+      // An Index that predates install ids answers with the key alone.
+      const minted = echoInstall ? { key: MINTED_KEY, install_id: asked } : { key: MINTED_KEY };
+      return setTimeout(() => json(res, 200, minted), mintDelayMs);
     }
     // Everything else is reporting, which may use the minted key and nothing else.
     if (bearer !== `Bearer ${MINTED_KEY}`) {

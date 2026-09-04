@@ -441,24 +441,6 @@ def _has_usage_table(db):
         return False
 
 
-def hermes_store(home=None):
-    """The Hermes store this install reports from.
-
-    Told where to look, or guessing. ~/.hermes can exist while holding a
-    different schema, so each candidate is checked for the table rather than
-    for existence: the old code errored on the first path instead of trying
-    ~/.hermes-life next door, which is where a Plow agent's store actually
-    lives. Measured, not assumed."""
-    if home:
-        homes = [home]
-    elif os.environ.get("HERMES_HOME"):
-        homes = [os.environ["HERMES_HOME"]]
-    else:
-        homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
-    return next((c for c in (os.path.join(h, "state.db") for h in homes)
-                 if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
-
-
 def state_dir(home=None):
     """The directory this install's identity lives in.
 
@@ -497,7 +479,20 @@ def from_hermes(days, home=None, state_path=None):
     # Told where to look, or guessing. The difference decides what an absent
     # store MEANS, so it is carried rather than inferred later.
     configured = bool(home or os.environ.get("HERMES_HOME"))
-    db = hermes_store(home)
+    # Told where to look, or guessing. ~/.hermes can exist while holding a
+    # different schema, so each candidate is checked for the TABLE rather than
+    # for existence: the old code errored on the first path instead of trying
+    # ~/.hermes-life next door, which is where a Plow agent's store actually
+    # lives. Measured, not assumed -- and private to this function, because
+    # identity deliberately does not resolve this way (see state_dir).
+    if home:
+        homes = [home]
+    elif os.environ.get("HERMES_HOME"):
+        homes = [os.environ["HERMES_HOME"]]
+    else:
+        homes = [os.path.expanduser("~/.hermes"), os.path.expanduser("~/.hermes-life")]
+    db = next((c for c in (os.path.join(h, "state.db") for h in homes)
+               if os.path.exists(c) and _has_usage_table(c)), os.path.join(homes[0], "state.db"))
     legacy_lost = False
     # The store is resolved BEFORE the ledger moves anywhere: a wrong or unset
     # HERMES_HOME would otherwise move the only copy into a directory that holds
@@ -808,14 +803,23 @@ def register(agent, argv):
     # writing it first is what makes that unrecoverable.
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
         sys.exit("  key mint returned an unexpected shape")
-    if minted_install != mine:
+    if minted_install and minted_install != mine:
         sys.exit(f"  the Index minted against a different install than the one asked for; "
                  f"refusing to store a key whose usage would land somewhere else")
-    # The install FIRST. Interrupted between the two, an install with no key
-    # fails the next run loudly and re-registers onto the same id; a key with no
-    # install reports for good under an id nothing on disk can ever name again.
-    save_private(install_path(), minted_install)
-    save_private(TOKEN_PATH, key_out["key"])
+    # An Index that predates install ids echoes none, and says so by leaving the
+    # field out. It stored no id, so there is no id to keep: take the key and
+    # claim nothing, which is exactly what this client did before ids existed.
+    # The alternative is refusing to register against a server that is merely
+    # older than we are, which turns a deploy ORDER into broken installs.
+    if not minted_install:
+        save_private(TOKEN_PATH, key_out["key"])
+        print("  this Index does not count per-install usage yet; registered without an install id")
+    else:
+        # The install FIRST. Interrupted between the two, an install with no key
+        # fails the next run loudly and re-registers onto the same id; a key
+        # with no install reports for good under an id nothing on disk names.
+        save_private(install_path(), minted_install)
+        save_private(TOKEN_PATH, key_out["key"])
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on

@@ -67,12 +67,17 @@ home is named — which is what the shipped image does, on the volume the
 container keeps — so a container recreated with its data volume and a fresh home
 is still the same install. With no Hermes home named there is no volume in play,
 it is a host install, and the id sits beside the key at
-`~/.agent-index/install`. Either way the location is fixed by what you told it,
+`~/.agent-index/.agent-index-install`. Either way the location is fixed by what you told it,
 never by which store it happens to find, so a store appearing later cannot move
 it. The Index counts a day's usage under that id
 rather than under the key, so replacing a compromised key keeps this install's
 numbers on the rows they were already on instead of starting a second install
 that double-counts the day.
+
+This needs the Index to accept and echo an `install_id` on `POST /v1/keys`
+(`plow-pbc/agent-index-server#7`), which merges first. Against an Index that
+does not, registration still works and simply claims no id — deploy order
+cannot break an install.
 
 An install that predates the file claims an id on its next `--register` and
 keeps it from then on. The days still in its reporting window exist twice for a

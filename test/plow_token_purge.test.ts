@@ -489,61 +489,64 @@ const installFile = (data: string) => path.join(data, ".agent-index-install");
 const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
   (s.indexHits.filter((h) => h.path === "/v1/keys").at(-1)!.body as { install_id?: string }).install_id;
 
-test("the install id is on the volume, so a recreated container is the same install", async () => {
-  const s = await standIns();
-  try {
-    const first = volumeHome(s);
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], first.home, first.env)).code, 0);
-    const mine = fs.readFileSync(installFile(first.data), "utf8");
-    assert.match(mine, /^[A-Za-z0-9_-]{8,64}$/, "a first install names itself");
-    assert.equal(askedInstall(s), mine, "and says which install it is");
-    assert.equal(fs.statSync(installFile(first.data)).mode & 0o777, 0o600);
-
-    // Recreated: same volume, brand new home, no token. Kept in the home the id
-    // would be gone here and this install would mint a second one and strand
-    // every row it has written.
-    const again = volumeHome(s, first.data);
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], again.home, again.env)).code, 0);
-    assert.equal(askedInstall(s), mine, "the recreated container is the same install");
-  } finally {
-    await s.close();
-  }
-});
-
-// Two shapes of an install that predates install ids: one recreated with only
-// its data volume (the ledger survived, the home-scoped token did not), one
-// still holding its key. Neither has an id, and the rule is the same for both.
-for (const [shape, seed] of [
-  ["a ledger and no token", (home: string, data: string) =>
+// One lifecycle, three ways in. Each row is a state a container can start
+// from; all three then do the same thing, which is the point: claim an id
+// once, keep it on the volume, and still be that install after a recreation
+// that takes the home away.
+for (const [start, seed] of [
+  ["a first install", () => {}],
+  ["an install with a ledger and no token", (home: string, data: string) =>
     fs.writeFileSync(path.join(data, ".agent-index-state.json"), '{"version":1,"snapshot":{},"daily":{}}')],
-  ["a token and no ledger", (home: string, _data: string) => {
+  ["an install with a token and no ledger", (home: string) => {
     fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
     fs.writeFileSync(tokenPath(home), MINTED_KEY);
   }],
 ] as [string, (home: string, data: string) => void][]) {
-  test(`an install with ${shape} names itself once, and never again`, async () => {
+  test(`${start} names itself once, and is still that install after a recreation`, async () => {
     const s = await standIns();
     try {
       // Every install that predates install ids shares ONE unnamed bucket on
       // the Index, so staying there would leave an owner's two old installs
-      // overwriting each other permanently -- this bug, made forever, for
-      // exactly the installs that hit it first. It claims an id. What it must
-      // never do is claim a DIFFERENT one each time it comes back.
+      // overwriting each other permanently. Each claims an id. What none of
+      // them may do is claim a DIFFERENT one each time it comes back.
       const one = volumeHome(s);
       seed(one.home, one.data);
       assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home, one.env)).code, 0);
       const claimed = String(askedInstall(s));
       assert.match(claimed, /^[A-Za-z0-9_-]{8,64}$/);
       assert.equal(fs.readFileSync(installFile(one.data), "utf8"), claimed);
+      assert.equal(fs.statSync(installFile(one.data)).mode & 0o777, 0o600, "not world-readable");
 
+      // Recreated: same volume, brand new home, no token. Kept in the home the
+      // id would be gone here, and this install would mint a second one and
+      // strand every row it has written.
       const two = volumeHome(s, one.data);
       assert.equal((await clientAsync(["--register", "--agent", "purge-test"], two.home, two.env)).code, 0);
-      assert.equal(askedInstall(s), claimed, "a legacy install names itself ONCE, not once per run");
+      assert.equal(askedInstall(s), claimed, "the same install, not a new one");
     } finally {
       await s.close();
     }
   });
 }
+
+test("an Index that does not count per-install usage yet still gets a working install", async () => {
+  // Deploy ORDER must not be able to break installs. The server half of this
+  // (agent-index-server#7) merges first, but an Index that predates install
+  // ids echoes no install_id, and refusing to register against one that is
+  // merely older than we are would turn an ordering mistake into broken
+  // containers. It takes the key and claims nothing, which is what this client
+  // did before ids existed.
+  const s = await standIns(0, { echoInstall: false });
+  try {
+    const { home, data, env } = volumeHome(s);
+    const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(fs.readFileSync(tokenPath(home), "utf8"), MINTED_KEY, "the key is stored and reporting works");
+    assert.ok(!fs.existsSync(installFile(data)), "and no id is claimed that the Index did not store");
+  } finally {
+    await s.close();
+  }
+});
 
 for (const [what, content] of [["zero-byte", ""], ["whitespace-only", "  \n"], ["malformed", "not an id!!"]]) {
   test(`a ${what} install file stops the run instead of quietly becoming a new install`, async () => {
