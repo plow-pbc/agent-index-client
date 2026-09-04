@@ -13,11 +13,16 @@ Three calls, three payloads:
 - `--register` posts the page content you hand it — the agent id, plus whatever
   you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
   `--image` and `--install-url`. All of it is public: it *is* the agent's page.
+  It also sends one id for this install — random, made up here once and kept —
+  so the Index can tell two installs of one agent apart instead of adding them
+  together.
 - A report posts day x model token counts, and nothing else.
 - `--story` posts the one story you wrote — its title, body, tags and images.
 
-**No prompts, no task text, no file paths, no costs.** The only thing read off
-this machine and sent is the token counts; everything else is what you typed.
+**No prompts, no task text, no file paths, no costs.** The only thing *measured*
+off this machine and sent is the token counts. Everything else is what you
+typed, or that one install id — drawn from random bytes, not from anything
+about the machine, so it identifies the install and nothing else.
 
 ## Install
 
@@ -56,6 +61,37 @@ installs have, and dropping it would sign them out with nothing to replace it.
 A fresh install exchanges its Plow token for a short-lived assertion, then the
 Index mints its report-only key. A GitHub bearer left in that file is a
 different matter and is deleted on the next run rather than sent.
+
+This install's identity — which install it is, and the key that reports for it —
+lives in ONE file: `<HERMES_HOME>/.agent-index.json` when a Hermes home is named,
+which is what the shipped image does, on the volume the container keeps, so a
+container recreated with a fresh home is still the same install; and
+`~/.agent-index/.agent-index.json` on a host install, where there is no volume in
+play. Either way the location is fixed by what you told it, never by which store
+it happens to find, so a store appearing later cannot move it. The Index counts a
+day's usage under that id rather than under the key, so replacing a compromised
+key keeps this install's numbers on the rows they were already on instead of
+starting a second install that double-counts the day.
+
+One file rather than two, because the two must never disagree: written
+separately, a crash between the writes left the id claiming a named install
+while the key on disk was still the unnamed one it replaced, and every report
+after that went to the wrong place while the files said otherwise.
+
+An install that predates this file keeps reporting from where its key already
+is: reads move nothing. It upgrades when you register it — `--register` writes
+the new file and removes `~/.agent-index/token` once the key is safely inside,
+and stops with an error if that removal cannot happen rather than leaving a
+second live copy of the credential lying around.
+
+This needs an Index that accepts and echoes an `install_id` on `POST /v1/keys`.
+
+An install that predates the file claims an id on its next `--register` and
+keeps it from then on. The days still in its reporting window exist twice for a
+while — once under the rows it wrote before it had an id, once under its new
+ones — and read high until they age out. That is paid once: without it, every
+install that predates ids stays in one shared bucket on the Index, and an owner
+running two of them would have them overwrite each other forever.
 
 ## Use
 
@@ -136,9 +172,25 @@ The same rule covers agentsview: **installed and broken** stops the run,
 
 Bake the **client**. Never bake the **token**.
 
-Identity comes from `PLOW_AGENT_TOKEN`, which each container already has and
-which is scoped to that container's own agent — so nothing identifying belongs
-in an image layer, and two installs are never mistaken for one.
+`PLOW_AGENT_TOKEN` says which **agent** this is: each container already has one,
+scoped to that container's own agent, so nothing identifying belongs in an image
+layer. It does not say which **install** — one owner can run the same agent
+twice, and both containers hold a token for it. That is what
+`$HERMES_HOME/.agent-index.json` is for, and why it has to outlive the
+container.
+
+The image declares `VOLUME /opt/data` (which is `HERMES_HOME`) so a plain
+`docker run` keeps it. **Mount it by name**, and reuse that name when you
+recreate the container:
+
+```bash
+docker volume create life-data
+docker run -d --name hermes-life -v life-data:/opt/data … your-image
+```
+
+An anonymous volume is a new one on every `docker run`, which loses the install
+exactly as if nothing had been declared: it registers again, is given a new id,
+and its numbers land beside the ones it wrote before rather than on top of them.
 
 A leftover `~/.agent-index/token` from the GitHub era is deleted on first use
 rather than sent: nothing can exchange it any more, and a GitHub bearer must

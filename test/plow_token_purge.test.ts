@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY } from "./fake-plow-index";
+import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY, type StandIns } from "./fake-plow-index";
 
 // The standalone client is the copy that ships inside a container, so these
 // drive the real script rather than a re-implementation of it.
@@ -99,6 +100,8 @@ for (const c of CASES) {
     } else {
       assert.doesNotMatch(out, /removed a stored credential/);
       if (c.stored !== undefined) {
+        // Ours, so it is kept exactly where it is. A report reads the layout
+        // it finds and moves nothing; registering is what upgrades an install.
         assert.equal(fs.readFileSync(tokenFile, "utf8"), c.stored, "only GitHub bearers are legacy");
       }
     }
@@ -203,6 +206,15 @@ test("the image ships the client this repo builds", () => {
   assert.match(dockerfile, /COPY[^\n]*agent_index_client\.py \/usr\/local\/bin\/agent-index-client/,
     "the image must install this client, under the name the reporter service execs");
   assert.doesNotMatch(dockerfile, /COPY[^\n]*hermes_client\.py/, "and not the tokenmaxxing fork");
+
+  // And it keeps what a recreated container must not lose. HERMES_HOME holds
+  // the usage ledger and this install's identity; inside the writable layer,
+  // a recreated container registers as a stranger, is given a new install id,
+  // and its numbers arrive beside the ones it wrote instead of on top of them.
+  const home = dockerfile.match(/ENV HERMES_HOME=(\S+)/)?.[1];
+  assert.ok(home, "the image must say where Hermes keeps its state");
+  assert.match(dockerfile, new RegExp(`VOLUME ${home}\\b`),
+    `${home} holds the install id, so the image has to declare it as a volume`);
 });
 
 /** Install a stand-in agentsview in a home, running `body`.
@@ -340,6 +352,18 @@ test("a run with no credential fails before it does any work", () => {
 // so it needs servers rather than a dry run.
 // ---------------------------------------------------------------------------
 
+/** The two stand-ins, closed however the case ends. Every integration case
+ *  below wants exactly this and nothing else, and the identical try/finally in
+ *  each of them was one more place for a server to be left listening. */
+async function withStandIns<T>(body: (s: StandIns) => Promise<T>, mintDelayMs = 0): Promise<T> {
+  const s = await standIns(mintDelayMs);
+  try {
+    return await body(s);
+  } finally {
+    await s.close();
+  }
+}
+
 /** A home wired to the stand-ins, with a collector that finds nothing. */
 function bootstrapHome(s: { plow: string; index: string }) {
   const home = homeWith();               // a fresh install: nothing stored
@@ -355,9 +379,8 @@ function bootstrapHome(s: { plow: string; index: string }) {
   };
 }
 
-test("registration trades the Plow token for an assertion, and stores what the Index mints", async () => {
-  const s = await standIns();
-  try {
+test("registration trades the Plow token for an assertion, and stores what the Index mints", () =>
+  withStandIns(async (s) => {
     const { home, env } = bootstrapHome(s);
     const r = await clientAsync(["--register", "--agent", "purge-test", "--name", "Purge Test"], home, env);
     assert.equal(r.code, 0, r.out);
@@ -381,13 +404,11 @@ test("registration trades the Plow token for an assertion, and stores what the I
 
     // What lands on disk is the minted key, privately, by rename: a reader
     // that opens the file mid-write must never see a half-written credential.
-    assert.equal(fs.readFileSync(tokenPath(home), "utf8"), MINTED_KEY);
-    assert.equal(fs.statSync(tokenPath(home)).mode & 0o777, 0o600, "the key is not world-readable");
-    assert.ok(!fs.existsSync(tokenPath(home) + ".new"), "no temp file survives the write");
-  } finally {
-    await s.close();
-  }
-});
+    const state = path.join(home, ".agent-index", ".agent-index.json");
+    assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).key, MINTED_KEY);
+    assert.equal(fs.statSync(state).mode & 0o777, 0o600, "the key is not world-readable");
+    assert.ok(!fs.existsSync(state + ".new"), "no temp file survives the write");
+  }));
 
 // --install-url is the one registration field a publisher can UNSET, so its
 // three states are checked at the wire rather than in the argv parser: a link
@@ -415,9 +436,8 @@ test("--install-url sends a link, sends a clear, and stays silent when omitted",
   }
 });
 
-test("every later report carries the stored key alone, and never goes back to Plow", async () => {
-  const s = await standIns();
-  try {
+test("every later report carries the stored key alone, and never goes back to Plow", () =>
+  withStandIns(async (s) => {
     const { home, env } = bootstrapHome(s);
     const boot = await clientAsync(["--register", "--agent", "purge-test"], home, env);
     assert.equal(boot.code, 0, boot.out);
@@ -437,10 +457,7 @@ test("every later report carries the stored key alone, and never goes back to Pl
     // and is still not used, which is the whole point of storing a key.
     assert.equal(s.plowHits.length, plowCallsAfterBootstrap,
       "the exchange happens at bootstrap and never again");
-  } finally {
-    await s.close();
-  }
-});
+  }));
 
 test("a report prefers the stored key even while a Plow token is exported", async () => {
   // The ordering inside auth_headers(). With both present the Plow token is
@@ -458,6 +475,208 @@ test("a report prefers the stored key even while a Plow token is exported", asyn
     assert.equal(s.plowHits.length, 0, "a stored key needs no exchange");
     assert.doesNotMatch(s.indexSaw(), new RegExp(PLOW_TOKEN));
     assert.ok(s.indexHits.length > 0, "the report must actually have been sent");
+  } finally {
+    await s.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Which INSTALL is reporting. The Index counts a day's usage under an install
+// rather than under the key that authenticated it, so everything below is
+// about one question: does this container still know which install it is.
+// ---------------------------------------------------------------------------
+
+/** A home plus the volume a container keeps across recreations. The shipped
+ *  image sets HERMES_HOME=/opt/data and mounts it, which is what this is. */
+function volumeHome(s: { plow: string; index: string }, volume?: string) {
+  const home = homeWith();
+  stubAgentsView(home, "echo '[]'");
+  const data = volume || fs.mkdtempSync(path.join(os.tmpdir(), "aic-volume-"));
+  return {
+    home, data,
+    env: {
+      PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+      HERMES_HOME: data,
+    } as Record<string, string | undefined>,
+  };
+}
+
+/** The one file: which install this is, and the key that reports for it. */
+const stateFile = (dir: string) => path.join(dir, ".agent-index.json");
+/** A Hermes store with nothing in it: enough for the collector to read, which
+ *  is all these cases need. One schema, because two drift. */
+function createEmptyHermesStore(dir: string) {
+  fs.mkdirSync(dir, { recursive: true });
+  const db = new Database(path.join(dir, "state.db"));
+  db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
+          " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
+  db.close();
+}
+const stateOf = (dir: string) =>
+  JSON.parse(fs.readFileSync(stateFile(dir), "utf8")) as { install_id?: string; key?: string };
+const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
+  (s.indexHits.filter((h) => h.path === "/v1/keys").at(-1)!.body as { install_id?: string }).install_id;
+
+// One lifecycle, three ways in. Each row is a state a container can start
+// from; all three then do the same thing, which is the point: claim an id
+// once, keep it on the volume, and still be that install after a recreation
+// that takes the home away.
+for (const [start, seed] of [
+  ["a first install", () => {}],
+  ["an install with a ledger and no token", (home: string, data: string) =>
+    fs.writeFileSync(path.join(data, ".agent-index-state.json"), '{"version":1,"snapshot":{},"daily":{}}')],
+  ["an install that registered before install ids", (home: string) => {
+    fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
+    fs.writeFileSync(tokenPath(home), MINTED_KEY);      // the file this used to keep
+  }],
+] as [string, (home: string, data: string) => void][]) {
+  test(`${start} names itself once, and is still that install after a recreation`, () =>
+    withStandIns(async (s) => {
+      // Every install that predates install ids shares ONE unnamed bucket on
+      // the Index, so staying there would leave an owner's two old installs
+      // overwriting each other permanently. Each claims an id. What none of
+      // them may do is claim a DIFFERENT one each time it comes back.
+      const one = volumeHome(s);
+      seed(one.home, one.data);
+      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home, one.env)).code, 0);
+      const claimed = String(askedInstall(s));
+      assert.match(claimed, /^[A-Za-z0-9_-]{8,64}$/);
+      assert.deepEqual(stateOf(one.data), { install_id: claimed, key: MINTED_KEY },
+        "the install and the key that reports for it, in one file");
+      assert.equal(fs.statSync(stateFile(one.data)).mode & 0o777, 0o600, "not world-readable");
+
+      // Recreated: same volume, brand new home, no token. Kept in the home the
+      // id would be gone here, and this install would mint a second one and
+      // strand every row it has written.
+      const two = volumeHome(s, one.data);
+      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], two.home, two.env)).code, 0);
+      assert.equal(askedInstall(s), claimed, "the same install, not a new one");
+    }));
+}
+
+// State a file can be in that is not a state to carry on from. Each one used to
+// have a quiet reading -- "this install has no id" -- and each quiet reading
+// mints a second install and strands every row the first one wrote.
+for (const [what, content] of [
+  ["unparseable", "{not json at all"],
+  ["holding an id it cannot use", JSON.stringify({ install_id: "not an id!!", key: MINTED_KEY })],
+  ["holding an id and no key", JSON.stringify({ install_id: "install-abcdef01" })],
+  ["holding a credential that is not ours", JSON.stringify({ install_id: "install-abcdef01", key: "gho_x" })],
+]) {
+  test(`a state file ${what} stops the run instead of quietly becoming a new install`, () =>
+    withStandIns(async (s) => {
+      const { home, data, env } = volumeHome(s);
+      fs.mkdirSync(data, { recursive: true });
+      fs.writeFileSync(stateFile(data), content);
+      const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
+      assert.notEqual(r.code, 0, "a state we cannot read is not a state we may register over");
+      assert.match(r.out, new RegExp(stateFile(data).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        "and says which file to look at");
+      assert.equal(s.indexHits.filter((h) => h.path === "/v1/keys").length, 0, "nothing was minted");
+    }));
+}
+
+test("a crash during a legacy re-registration leaves the old pair or the new one, never a mix", () =>
+  withStandIns(async (s) => {
+    // The install this is about: registered before ids existed, so it holds a
+    // key and no id, and its rows are in the Index's unnamed bucket. Naming it
+    // replaces BOTH -- and written as two files, a crash in between left the id
+    // claiming a named install while the key on disk was still the unnamed one,
+    // so every later report went to the old bucket while the file said
+    // otherwise, and nothing on the next run could tell.
+    const { home, data, env } = volumeHome(s);
+    const OLD_KEY = "aik_" + "o".repeat(43);          // pragma: allowlist secret
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(stateFile(data), JSON.stringify({ key: OLD_KEY }));
+    // A real store on the volume, so the reporting run below is the ordinary
+    // path rather than a configured-and-missing failure.
+    createEmptyHermesStore(data);
+
+    // The crash: the write that replaces them dies after its temp file exists
+    // and before the rename. That is the only window there is now, and what is
+    // in the temp file is deliberately a mismatched pair.
+    fs.writeFileSync(stateFile(data) + ".new",
+      JSON.stringify({ install_id: "install-halfway", key: "aik_" + "n".repeat(43) })); // pragma: allowlist secret
+
+    const before = stateOf(data);
+    assert.deepEqual(before, { key: OLD_KEY }, "the old pair, untouched by a write that did not land");
+
+    // The next run reads the state, not the wreckage beside it, and reports
+    // with the key that is actually current.
+    assert.equal((await clientAsync(["--agent", "purge-test"], home, env)).code, 0);
+    assert.equal(s.indexHits.filter((h) => h.path.startsWith("/v1/usage")).at(-1)!.bearer,
+      `Bearer ${OLD_KEY}`, "the key in the state file is the one that reports");
+
+    // And when the replacement does land, it lands whole.
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    const after = stateOf(data);
+    assert.match(String(after.install_id), /^[A-Za-z0-9_-]{8,64}$/);
+    assert.equal(after.key, MINTED_KEY, "the id and the key that replaced it, together");
+  }));
+
+test("an install that predates the state file reports from where its key is, and upgrades when registered", () =>
+  withStandIns(async (s) => {
+    // Reads have no side effects: a report from a legacy install works off the
+    // layout that shipped and changes nothing. Migrating underneath it bought
+    // nothing and cost a whole-run lock, a cleanup retried on every load, and
+    // a reader that wrote.
+    const { home, data, env } = volumeHome(s);
+    fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
+    fs.writeFileSync(tokenPath(home), MINTED_KEY);
+    createEmptyHermesStore(data);
+
+    assert.equal((await clientAsync(["--agent", "purge-test"], home, env)).code, 0);
+    assert.equal(s.indexHits.filter((h) => h.path.startsWith("/v1/usage")).at(-1)!.bearer,
+      `Bearer ${MINTED_KEY}`, "it reports with the key it has");
+    assert.ok(fs.existsSync(tokenPath(home)), "and nothing moved under it");
+    assert.ok(!fs.existsSync(stateFile(data)));
+
+    // Registering is the explicit upgrade, and the only one.
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    assert.match(String(stateOf(data).install_id), /^[A-Za-z0-9_-]{8,64}$/);
+    assert.equal(stateOf(data).key, MINTED_KEY);
+    assert.ok(!fs.existsSync(tokenPath(home)),
+      "and the file the key used to live in is gone, now that this one holds it");
+  }));
+
+test("the install id does not move when a Hermes store appears later", () =>
+  withStandIns(async (s) => {
+    // Nobody says where Hermes lives, so the store is DISCOVERED: ~/.hermes
+    // today, ~/.hermes-life the moment one appears there. Hang identity off
+    // that discovery and the id is written under one and read from the other --
+    // the install arrives at its next registration with no id, mints a second
+    // one, and strands everything the first wrote.
+    const home = homeWith();
+    stubAgentsView(home, "echo '[]'");
+    const env = { PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+                  HERMES_HOME: undefined } as Record<string, string | undefined>;
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    const mine = String(askedInstall(s));
+
+    createEmptyHermesStore(path.join(home, ".hermes-life"));
+
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    assert.equal(askedInstall(s), mine, "the store moved; the install did not");
+  }));
+
+test("two registrations at once agree on one install", async () => {
+  // The mint holds the line, so the second registration is genuinely inside the
+  // first. Unserialised, both read "no id", both generate their own, and their
+  // renames interleave: the id file holds one process's install and the token
+  // file the other process's key.
+  const s = await standIns(400);
+  try {
+    const { home, data, env } = volumeHome(s);
+    const both = await Promise.all([
+      clientAsync(["--register", "--agent", "purge-test"], home, env),
+      clientAsync(["--register", "--agent", "purge-test"], home, env),
+    ]);
+    for (const r of both) assert.equal(r.code, 0, r.out);
+    const mints = s.indexHits.filter((h) => h.path === "/v1/keys")
+      .map((h) => (h.body as { install_id?: string }).install_id);
+    assert.equal(mints.length, 2);
+    assert.equal(mints[0], mints[1], "the second reads the id the first wrote, and mints for that install");
+    assert.equal(stateOf(data).install_id, mints[0], "which is the id on disk");
   } finally {
     await s.close();
   }

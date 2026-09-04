@@ -17,9 +17,21 @@ WORKDIR /opt/hermes
 RUN uv venv && uv pip install --no-cache-dir -e .
 ENV PATH=/opt/hermes/.venv/bin:$PATH
 
-# Hermes keeps state.db under HERMES_HOME; the client reads it from there.
+# Hermes keeps state.db under HERMES_HOME; the client reads it from there, and
+# keeps its own state.json beside it.
 ENV HERMES_HOME=/opt/data
 RUN mkdir -p /opt/data
+
+# WHAT SURVIVES A RECREATION. /opt/data holds the usage ledger and, with it,
+# this install's identity -- which install it is and the key that reports for
+# it. Left inside the container's writable layer, a recreated container starts
+# as a stranger: it registers again, is given a new install id, and its numbers
+# arrive beside the ones it wrote before instead of on top of them.
+#
+# The declaration is what makes a plain `docker run` keep it at all. Mount it by
+# NAME to keep it across recreations -- an anonymous volume is a fresh one every
+# time, which is the same loss with extra steps.
+VOLUME /opt/data
 
 # The client this repo ships, under the name the agent's reporter service
 # execs. It used to install hermes_client.py, which is the tokenmaxxing-format
