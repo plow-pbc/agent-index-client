@@ -12,6 +12,10 @@ export const PLOW_TOKEN = "plow-token-for-this-container";   // pragma: allowlis
 export const ASSERTION = "plow_index_" + "a".repeat(40);     // pragma: allowlist secret
 /** What the Index mints in exchange, and every later report carries. */
 export const MINTED_KEY = "aik_" + "m".repeat(43);           // pragma: allowlist secret
+/** The unnamed install: what a key gets when its holder did not say which
+ *  install it is. The real Index stores '' and keeps that key on the rows an
+ *  install with no id of its own has always written. */
+export const UNNAMED_INSTALL = "";
 
 export type Hit = { method: string; path: string; bearer: string; body?: unknown };
 
@@ -78,15 +82,20 @@ export async function standIns(): Promise<StandIns> {
   const index = await listen(async (req, res) => {
     const path = new URL(req.url || "/", "http://x").pathname;
     const bearer = bearerOf(req);
-    indexHits.push({ method: req.method || "", path, bearer, body: await bodyOf(req) });
+    const body = await bodyOf(req);
+    indexHits.push({ method: req.method || "", path, bearer, body });
     // Registration and minting are the assertion's job, and ONLY the
     // assertion's: a Plow token here is the leak, so it is a 401.
     if (path === "/v1/agents" || path === "/v1/keys") {
       if (bearer !== `Bearer ${ASSERTION}`) {
         return json(res, 401, { error: "the Index takes an assertion, not a Plow token" });
       }
+      // Store what you are told, and nothing if you are told nothing -- the
+      // Index generates no id of its own, so a stand-in that invented one
+      // would hide a client that stopped sending its install.
+      const asked = String((body as { install_id?: unknown } | undefined)?.install_id || UNNAMED_INSTALL);
       return path === "/v1/keys"
-        ? json(res, 200, { key: MINTED_KEY })
+        ? json(res, 200, { key: MINTED_KEY, install_id: asked })
         : json(res, 200, { result: "registered", url: "https://agents.plow.co/purge-test" });
     }
     // Everything else is reporting, which may use the minted key and nothing else.

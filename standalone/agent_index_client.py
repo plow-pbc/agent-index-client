@@ -104,6 +104,13 @@ API = _api(os.environ.get("AGENT_INDEX_API", ""))
 PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
 LOOPBACK = API != INDEX_ORIGIN
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
+# WHICH install this is, beside the credential that reports for it. The Index
+# keys a day's usage on this, and a key is not it: recovering a compromised
+# install revokes the key and mints another, and keyed on the credential the
+# replacement reads as a second install -- its next cumulative report lands
+# beside the old rows instead of on them, and the day is counted twice. Kept in
+# its own file so replacing the key never disturbs it.
+INSTALL_PATH = os.path.expanduser("~/.agent-index/install")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
 # Collectors append here when a read genuinely FAILED, as opposed to finding
@@ -203,13 +210,30 @@ def index_assertion():
     return {"authorization": "Bearer " + assertion}
 
 
-def save_key(value):
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    temp = TOKEN_PATH + ".new"
+def save_private(path, value):
+    """Write by rename, 0600: a reader that opens mid-write sees the old value
+    or the new one, never half of either."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = path + ".new"
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(value)
-    os.replace(temp, TOKEN_PATH)
+    os.replace(temp, path)
+
+
+# The shape the Index accepts back, so a corrupted file is dropped here rather
+# than refused on the far side after the key is already minted against a new
+# install id -- which is the split this whole file exists to prevent.
+INSTALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def install_id(path=None):
+    """This install's id, or "" if there is not one we can use yet."""
+    try:
+        stored = open(path or INSTALL_PATH).read().strip()
+    except OSError:
+        return ""
+    return stored if INSTALL_ID.match(stored) else ""
 
 
 # The one shape a stored credential may have: the index mints aik_ + 43
@@ -694,10 +718,20 @@ def register(agent, argv):
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
-    code, key_out = _post(API + "/v1/keys", {"label": agent}, assertion)
+    # Re-registering is how a compromised install recovers, so it says which
+    # install it IS. Absent, the Index makes a new one and hands it back.
+    mint = {"label": agent}
+    if install_id():
+        mint["install_id"] = install_id()
+    code, key_out = _post(API + "/v1/keys", mint, assertion)
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
         sys.exit("  key mint returned an unexpected shape")
-    save_key(key_out["key"])
+    save_private(TOKEN_PATH, key_out["key"])
+    # The key first: an install whose id was stored and whose key was not has
+    # no way to report at all, where the reverse merely starts a new install.
+    minted_install = str(key_out.get("install_id", ""))
+    if INSTALL_ID.match(minted_install):
+        save_private(INSTALL_PATH, minted_install)
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on

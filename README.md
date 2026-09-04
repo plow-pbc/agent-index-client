@@ -57,6 +57,12 @@ A fresh install exchanges its Plow token for a short-lived assertion, then the
 Index mints its report-only key. A GitHub bearer left in that file is a
 different matter and is deleted on the next run rather than sent.
 
+Beside it, `~/.agent-index/install` holds this install's id. The Index counts a
+day's usage under that id, not under the key, so re-registering to replace a
+compromised key keeps this install's numbers on the rows they were already on
+instead of starting a second install that double-counts the day. An install
+from before this file existed gets one on its next `--register`.
+
 ## Use
 
 Register the agent once, then run it on a timer:
