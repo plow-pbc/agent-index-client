@@ -495,19 +495,24 @@ test("the install id survives a container recreation, because it is not in the h
   }
 });
 
-test("an install with a key and no id stays in the unnamed bucket", async () => {
+test("an install that has been reporting without an id names itself, once", async () => {
   const s = await standIns();
   try {
     const { home, env } = bootstrapHome(s);
-    // Every install that predates install ids: it has a key, it has been
-    // reporting, and its rows are in the '' bucket the server keys unnamed
-    // installs into. Claiming an id on re-registration would strand all of
-    // them, so it claims nothing and the Index keeps this key unnamed too.
+    // Every install that predates install ids shares ONE unnamed bucket on the
+    // Index. Staying there to protect the rows already in it would leave an
+    // owner's two old installs overwriting each other permanently -- this bug,
+    // made forever, for exactly the installs that hit it first. So it claims an
+    // id, and the same one from then on.
     fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
     fs.writeFileSync(tokenPath(home), MINTED_KEY);
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
-    assert.equal(askedInstall(s), undefined, "a legacy install must not name itself");
-    assert.ok(!fs.existsSync(installPath(home)), "and must not start holding an id it never reported under");
+    const claimed = askedInstall(s);
+    assert.match(String(claimed), /^[A-Za-z0-9_-]{8,64}$/, "a legacy install names itself");
+    assert.equal(fs.readFileSync(installPath(home), "utf8"), claimed);
+
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
+    assert.equal(askedInstall(s), claimed, "and never renames itself afterwards");
   } finally {
     await s.close();
   }

@@ -747,23 +747,23 @@ def register(agent, argv):
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
         sys.exit(f"  registration failed: {code} {out}")
-    # WHICH install is minting, in the three situations there are.
+    # WHICH install is minting. It always says, and it says the same thing
+    # every time once it has said it.
     #
-    #  - We have an id: say it. Re-registering is how a compromised install
-    #    recovers, and the replacement key has to keep this install's rows.
-    #  - No id but a key on disk: this install has been reporting WITHOUT one,
-    #    so its rows are in the unnamed bucket the Index keys as ''. Claiming a
-    #    new id here would strand every one of them. Say nothing, and the Index
-    #    keeps this key unnamed too.
-    #  - Neither: a first install, which names ITSELF. The Index stores what it
-    #    is told and invents nothing, so two fresh installs under one owner are
-    #    only distinguishable because each brought its own id.
-    mine = install_id()
-    mint = {"label": agent}
-    if mine:
-        mint["install_id"] = mine
-    elif not os.path.exists(TOKEN_PATH):
-        mint["install_id"] = secrets.token_hex(16)
+    # An install that has been reporting WITHOUT an id is in the Index's
+    # unnamed bucket, and staying there to protect the rows already in it is a
+    # trap: EVERY install that predates ids is in that one bucket, so an owner
+    # with two of them has two installs permanently overwriting each other --
+    # which is the bug this whole change exists to fix, made permanent for
+    # exactly the installs that hit it first. So it names itself here, once.
+    #
+    # The cost is paid once and it is bounded: the days still in the reporting
+    # window exist under both the old unnamed rows and this install's new ones,
+    # so those days read high until they age out of the window. Nothing can
+    # move the old rows instead -- an owner's legacy installs all share the ''
+    # bucket, so there is no way to tell which of them wrote what.
+    mine = install_id() or secrets.token_hex(16)
+    mint = {"label": agent, "install_id": mine}
     code, key_out = _post(API + "/v1/keys", mint, assertion)
     minted_install = str(key_out.get("install_id", ""))
     # The WHOLE response, before anything is written. A key stored against an
@@ -771,14 +771,13 @@ def register(agent, argv):
     # writing it first is what makes that unrecoverable.
     if code != 200 or not AGENT_KEY.match(str(key_out.get("key", ""))):
         sys.exit("  key mint returned an unexpected shape")
-    if minted_install != mint.get("install_id", ""):
+    if minted_install != mine:
         sys.exit(f"  the Index minted against a different install than the one asked for; "
                  f"refusing to store a key whose usage would land somewhere else")
     # The install FIRST. Interrupted between the two, an install with no key
     # fails the next run loudly and re-registers onto the same id; a key with no
     # install reports for good under an id nothing on disk can ever name again.
-    if minted_install:
-        save_private(install_path(), minted_install)
+    save_private(install_path(), minted_install)
     save_private(TOKEN_PATH, key_out["key"])
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):

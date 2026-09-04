@@ -65,9 +65,12 @@ rather than under the key, so replacing a compromised key keeps this install's
 numbers on the rows they were already on instead of starting a second install
 that double-counts the day.
 
-An install that predates the file keeps reporting exactly as it does now: it
-claims no id, and the Index leaves its key unnamed, which is where its existing
-rows already are.
+An install that predates the file claims an id on its next `--register` and
+keeps it from then on. The days still in its reporting window exist twice for a
+while — once under the rows it wrote before it had an id, once under its new
+ones — and read high until they age out. That is paid once: without it, every
+install that predates ids stays in one shared bucket on the Index, and an owner
+running two of them would have them overwrite each other forever.
 
 ## Use
 
