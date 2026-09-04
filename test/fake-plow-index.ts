@@ -20,13 +20,14 @@ function bearerOf(req: http.IncomingMessage): string {
 }
 
 /** What the caller SENT, so a hit can be checked for content and not only for
- *  which credential carried it. Unparseable stays undefined rather than
- *  throwing: a stand-in that 500s on a malformed body hides the real failure. */
+ *  which credential carried it. A body that will not parse throws HERE: the
+ *  client serialises every one of these, so unparseable is a transport failure,
+ *  and swallowing it would surface as a puzzling assertion much further away. */
 async function bodyOf(req: http.IncomingMessage): Promise<unknown> {
   const raw = await new Promise<string>((r) => {
     let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => r(b));
   });
-  try { return raw ? JSON.parse(raw) : undefined; } catch { return undefined; }
+  return raw ? JSON.parse(raw) : undefined;
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
