@@ -8,6 +8,7 @@
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
     agent_index_client.py --agent life --story ID --title T [--body B] [--tag T]...
+    agent_index_client.py status                    # 0 registered, 3 not, 2 cannot tell
     agent_index_client.py --self-check
 
 Collects from two places, because neither alone covers a real machine:
@@ -944,6 +945,51 @@ def _unknown_flags(argv):
     return unknown
 
 
+def status():
+    """Whether THIS install is registered, for a caller that has to decide
+    whether to register before it reports.
+
+    The caller cannot answer this itself, and the ones that tried got it wrong.
+    Where the state lives is this file's to know -- HERMES_HOME or the home, the
+    one-file state or the key the layout that shipped left behind -- and this
+    file MOVES it: retire_legacy() deletes the old path the moment the new file
+    holds the key. A caller testing for that path is told "not registered"
+    forever, and registers on every tick, minting a key each time. That ran
+    hourly in every life-assistant container until somebody read the logs.
+
+    An exit code, not output, because the caller is a shell loop and three
+    answers is the whole contract:
+
+      0  registered -- report with the stored key
+      3  not registered -- register first
+      2  cannot tell: state that is THERE and unreadable
+
+    2 is not 3, and a caller must never collapse them. Registering over state we
+    could not read mints against a new install id and strands every row the
+    first one published -- the split this client keeps its id and key in one
+    file to prevent. Unreadable is a five-second fix for whoever is told; it is
+    unrecoverable if we register past it.
+
+    Reads only: no network, no purge, no agent id. A query whose asking changes
+    the answer is one no caller can afford to make.
+    """
+    try:
+        state = load_state()
+    except SystemExit as stop:
+        # load_state refuses by exiting with its own explanation of WHICH file
+        # and why. That text is the useful half of this answer -- pass it on
+        # rather than replacing it with a code the operator has to look up.
+        print(stop.code if isinstance(stop.code, str) else
+              "  this install's state could not be read", file=sys.stderr)
+        return 2
+    if not state.get("key"):
+        print("  not registered: no key for this install")
+        return 3
+    print("  registered: install " +
+          (state["install_id"] or "(unnamed -- it pre-dates install ids)"))
+    return 0
+
+
 def main(argv):
     # Reject unknown flags BEFORE any collection or POST. Without this, main()
     # fell through to the live _post for anything it did not recognise, so
@@ -963,6 +1009,11 @@ def main(argv):
     # first deleted the token off the machine of whoever ran the tests.
     if "--self-check" in argv:
         return self_check()
+    # Before the purge, and before the agent id is demanded. A read-only
+    # question about what is on disk must not be a path that deletes something,
+    # and which agent this is has no bearing on whether this install registered.
+    if argv[:1] == ["status"]:
+        return status()
     purge_unusable_token()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
@@ -1381,4 +1432,10 @@ def self_check():
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    # EXIT with what main returned. It was dropped, so every path that answers
+    # by returning a code -- `status`, and the unknown-flag guard's documented
+    # 2 -- exited 0 and told the caller the opposite of what it meant. The paths
+    # that mattered until now sys.exit() themselves, which is why nothing
+    # noticed. A command whose whole contract IS its exit code cannot be added
+    # on top of an entry point that throws it away.
+    sys.exit(main(sys.argv[1:]))
