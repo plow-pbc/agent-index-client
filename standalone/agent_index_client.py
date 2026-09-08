@@ -84,6 +84,15 @@ def _plow_api(url):
     sys.exit("PLOW_API_BASE must be https or a bare loopback origin")
 
 
+def use_index():
+    """Resolve and validate the API overrides. Called by the commands that
+    reach the Index, and by nothing that only reads local state."""
+    global API, PLOW_API, LOOPBACK
+    API = _api(os.environ.get("AGENT_INDEX_API", ""))
+    PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
+    LOOPBACK = API != INDEX_ORIGIN
+
+
 def _shown(url):
     """A URL safe to print: scheme, host and port, nothing else.
 
@@ -104,9 +113,13 @@ def _shown(url):
     return f"{parts.scheme}://{host}{port}"
 
 
-API = _api(os.environ.get("AGENT_INDEX_API", ""))
-PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
-LOOPBACK = API != INDEX_ORIGIN
+# Resolved by use_index(), for the commands that talk to the Index. NOT at
+# import: `status` answers from local state alone, and it must be able to. These
+# were validated at import, so a machine with a typo in AGENT_INDEX_API killed
+# the one command whose entire contract is its exit code -- it exited 1 for all
+# three answers, and a supervisor reading that as "not registered" would then
+# register on every tick, which is the failure `status` exists to end.
+API = PLOW_API = LOOPBACK = None
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
@@ -946,41 +959,25 @@ def _unknown_flags(argv):
 
 
 def status():
-    """Whether THIS install is registered, for a caller that has to decide
-    whether to register before it reports.
+    """Whether THIS install is registered, by exit code, for a supervisor
+    deciding whether to register before it reports.
 
-    The caller cannot answer this itself, and the ones that tried got it wrong.
-    Where the state lives is this file's to know -- HERMES_HOME or the home, the
-    one-file state or the key the layout that shipped left behind -- and this
-    file MOVES it: retire_legacy() deletes the old path the moment the new file
-    holds the key. A caller testing for that path is told "not registered"
-    forever, and registers on every tick, minting a key each time. That ran
-    hourly in every life-assistant container until somebody read the logs.
+      0  registered
+      3  not registered
+      2  state is THERE and could not be read
 
-    An exit code, not output, because the caller is a shell loop and three
-    answers is the whole contract:
-
-      0  registered -- report with the stored key
-      3  not registered -- register first
-      2  cannot tell: state that is THERE and unreadable
-
-    2 is not 3, and a caller must never collapse them. Registering over state we
-    could not read mints against a new install id and strands every row the
-    first one published -- the split this client keeps its id and key in one
-    file to prevent. Unreadable is a five-second fix for whoever is told; it is
-    unrecoverable if we register past it.
-
-    Reads only: no network, no purge, no agent id. A query whose asking changes
-    the answer is one no caller can afford to make.
+    2 is not 3 and a caller must never collapse them. Reads only: no network,
+    no purge, no agent id. Why a caller cannot answer this itself, and what
+    collapsing 2 into 3 costs: README, "Asking whether an install is
+    registered".
     """
     try:
         state = load_state()
     except SystemExit as stop:
-        # load_state refuses by exiting with its own explanation of WHICH file
-        # and why. That text is the useful half of this answer -- pass it on
-        # rather than replacing it with a code the operator has to look up.
-        print(stop.code if isinstance(stop.code, str) else
-              "  this install's state could not be read", file=sys.stderr)
+        # load_state refuses by exiting with its own account of WHICH file and
+        # why. That text is the useful half of this answer -- pass it on rather
+        # than replace it with a code somebody has to look up.
+        print(stop.code, file=sys.stderr)
         return 2
     if not state.get("key"):
         print("  not registered: no key for this install")
@@ -1014,6 +1011,10 @@ def main(argv):
     # and which agent this is has no bearing on whether this install registered.
     if argv[:1] == ["status"]:
         return status()
+    # Everything below this line can reach the Index, so the overrides are
+    # resolved here -- once, and after the one command that must survive a bad
+    # one has already answered.
+    use_index()
     purge_unusable_token()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
