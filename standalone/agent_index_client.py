@@ -8,6 +8,7 @@
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
     agent_index_client.py --agent life --story ID --title T [--body B] [--tag T]...
+    agent_index_client.py status                    # 0 registered, 3 not, 2 cannot tell
     agent_index_client.py --self-check
 
 Collects from two places, because neither alone covers a real machine:
@@ -83,6 +84,15 @@ def _plow_api(url):
     sys.exit("PLOW_API_BASE must be https or a bare loopback origin")
 
 
+def use_index():
+    """Resolve and validate the API overrides. Called by the commands that
+    reach the Index, and by nothing that only reads local state."""
+    global API, PLOW_API, LOOPBACK
+    API = _api(os.environ.get("AGENT_INDEX_API", ""))
+    PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
+    LOOPBACK = API != INDEX_ORIGIN
+
+
 def _shown(url):
     """A URL safe to print: scheme, host and port, nothing else.
 
@@ -103,9 +113,13 @@ def _shown(url):
     return f"{parts.scheme}://{host}{port}"
 
 
-API = _api(os.environ.get("AGENT_INDEX_API", ""))
-PLOW_API = _plow_api(os.environ.get("PLOW_API_BASE", ""))
-LOOPBACK = API != INDEX_ORIGIN
+# Resolved by use_index(), for the commands that talk to the Index. NOT at
+# import: `status` answers from local state alone, and it must be able to. These
+# were validated at import, so a machine with a typo in AGENT_INDEX_API killed
+# the one command whose entire contract is its exit code -- it exited 1 for all
+# three answers, and a supervisor reading that as "not registered" would then
+# register on every tick, which is the failure `status` exists to end.
+API = PLOW_API = LOOPBACK = None
 TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
@@ -944,6 +958,35 @@ def _unknown_flags(argv):
     return unknown
 
 
+def status():
+    """Whether THIS install is registered, by exit code, for a supervisor
+    deciding whether to register before it reports.
+
+      0  registered
+      3  not registered
+      2  state is THERE and could not be read
+
+    2 is not 3 and a caller must never collapse them. Reads only: no network,
+    no purge, no agent id. Why a caller cannot answer this itself, and what
+    collapsing 2 into 3 costs: README, "Asking whether an install is
+    registered".
+    """
+    try:
+        state = load_state()
+    except SystemExit as stop:
+        # load_state refuses by exiting with its own account of WHICH file and
+        # why. That text is the useful half of this answer -- pass it on rather
+        # than replace it with a code somebody has to look up.
+        print(stop.code, file=sys.stderr)
+        return 2
+    if not state.get("key"):
+        print("  not registered: no key for this install")
+        return 3
+    print("  registered: install " +
+          (state["install_id"] or "(unnamed -- it pre-dates install ids)"))
+    return 0
+
+
 def main(argv):
     # Reject unknown flags BEFORE any collection or POST. Without this, main()
     # fell through to the live _post for anything it did not recognise, so
@@ -963,6 +1006,15 @@ def main(argv):
     # first deleted the token off the machine of whoever ran the tests.
     if "--self-check" in argv:
         return self_check()
+    # Before the purge, and before the agent id is demanded. A read-only
+    # question about what is on disk must not be a path that deletes something,
+    # and which agent this is has no bearing on whether this install registered.
+    if argv[:1] == ["status"]:
+        return status()
+    # Everything below this line can reach the Index, so the overrides are
+    # resolved here -- once, and after the one command that must survive a bad
+    # one has already answered.
+    use_index()
     purge_unusable_token()
     agent = argv[argv.index("--agent") + 1] if "--agent" in argv else os.environ.get("AGENT_ID")
     if not agent:
@@ -1381,4 +1433,10 @@ def self_check():
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    # EXIT with what main returned. It was dropped, so every path that answers
+    # by returning a code -- `status`, and the unknown-flag guard's documented
+    # 2 -- exited 0 and told the caller the opposite of what it meant. The paths
+    # that mattered until now sys.exit() themselves, which is why nothing
+    # noticed. A command whose whole contract IS its exit code cannot be added
+    # on top of an entry point that throws it away.
+    sys.exit(main(sys.argv[1:]))

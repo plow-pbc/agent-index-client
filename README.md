@@ -86,6 +86,34 @@ second live copy of the credential lying around.
 
 This needs an Index that accepts and echoes an `install_id` on `POST /v1/keys`.
 
+### Asking whether an install is registered
+
+```bash
+./agent_index_client.py status
+```
+
+| exit | means | what the caller does |
+|---|---|---|
+| `0` | registered | report with the stored key |
+| `3` | not registered | register first |
+| `2` | state is there and cannot be read | stop, and say so |
+
+For supervisors that must register once and then report on a timer. Do not test
+for a file yourself: which file holds the key is this client's to know, and this
+client MOVES it — registering deletes `~/.agent-index/token` the moment the new
+state file holds the key, so a loop testing for that path is told "not
+registered" forever and mints a fresh key on every tick. `status` answers for
+both layouts.
+
+`2` is not `3`. Registering over state we could not read mints against a new
+install id and strands every row the first one published, which nothing can
+undo; unreadable state is a five-second fix for whoever is told about it. A
+caller that collapses the two has chosen the unrecoverable failure.
+
+It reads and does nothing else: no network, no agent id, and not even the
+startup purge that a reporting run does — a question whose asking changes the
+answer is one no supervisor can afford to poll.
+
 An install that predates the file claims an id on its next `--register` and
 keeps it from then on. The days still in its reporting window exist twice for a
 while — once under the rows it wrote before it had an id, once under its new
