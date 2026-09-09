@@ -558,30 +558,21 @@ for (const [start, seed] of [
 // the tenant so the first report claims that attempt instead of adding a second
 // row beside it. Without this the person who clicked and the container that
 // reported are two tries and one success on their own agent's page.
-//
-// One register, one expectation. The three cases differ by what the variable
-// holds and what gets minted, and nothing else.
-for (const [what, handed, expected] of [
-  ["the id the deploy handed us", "browser-abcdef01", "browser-abcdef01"],
-  ["a fresh random id when nothing was handed over", undefined, /^[A-Za-z0-9_-]{8,64}$/],
-] as [string, string | undefined, string | RegExp][]) {
-  test(`--register mints under ${what}`, () =>
-    withStandIns(async (s) => {
-      const one = volumeHome(s);
-      const env = handed === undefined ? one.env : { ...one.env, AGENT_INSTALL_ID: handed };
-      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home, env)).code, 0);
-      const asked = String(askedInstall(s));
-      if (typeof expected === "string") assert.equal(asked, expected);
-      else assert.match(asked, expected);
-    }));
-}
+test("--register mints under the id the deploy handed us", () =>
+  withStandIns(async (s) => {
+    const one = volumeHome(s);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home,
+      { ...one.env, AGENT_INSTALL_ID: "browser-abcdef01" })).code, 0);
+    assert.equal(askedInstall(s), "browser-abcdef01",
+      "minted under the attempt's own id, so the report can claim that row");
+  }));
 
 test("a malformed handoff refuses to mint rather than inventing an id", () =>
   withStandIns(async (s) => {
     // Fails CLOSED, and it has to. Minting a random id here writes it to state,
-    // state outranks the handoff on every later run, and a corrected variable
-    // could then never claim that browser's attempt. Refusing costs a re-run;
-    // accepting costs the link permanently.
+    // state then outranks the handoff forever, and a corrected variable could
+    // never claim that browser's attempt. Refusing costs a re-run; accepting
+    // costs the link permanently.
     const one = volumeHome(s);
     const run = await clientAsync(["--register", "--agent", "purge-test"], one.home,
       { ...one.env, AGENT_INSTALL_ID: "not an id!!" });
@@ -592,18 +583,26 @@ test("a malformed handoff refuses to mint rather than inventing an id", () =>
     assert.ok(!fs.existsSync(stateFile(one.data)), "and nothing was written to state");
   }));
 
-test("a stored id outranks the handoff", () =>
-  withStandIns(async (s) => {
-    // An install that has already reported IS that install. A stale variable in
-    // a recreated container must not rename it and strand every row it wrote.
-    const one = volumeHome(s);
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home,
-      { ...one.env, AGENT_INSTALL_ID: "browser-abcdef01" })).code, 0);
-    const two = volumeHome(s, one.data);
-    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], two.home,
-      { ...two.env, AGENT_INSTALL_ID: "browser-99999999" })).code, 0);
-    assert.equal(askedInstall(s), "browser-abcdef01", "still the install it already was");
-  }));
+// Stored identity wins, and it wins FIRST -- before the handoff is even looked
+// at. An install that has registered IS that install, so a stale variable must
+// not rename it, and a stale MALFORMED one must not stop it re-registering
+// either. Checking the variable before the state made that second case fatal.
+for (const [what, handed] of [
+  ["a newer id", "browser-99999999"],
+  ["a malformed one", "not an id!!"],
+] as [string, string][]) {
+  test(`a stored id outranks the handoff, even ${what}`, () =>
+    withStandIns(async (s) => {
+      const one = volumeHome(s);
+      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home,
+        { ...one.env, AGENT_INSTALL_ID: "browser-abcdef01" })).code, 0);
+      const two = volumeHome(s, one.data);
+      assert.equal((await clientAsync(["--register", "--agent", "purge-test"], two.home,
+        { ...two.env, AGENT_INSTALL_ID: handed })).code, 0,
+        "an install that already has an identity must always be able to re-register");
+      assert.equal(askedInstall(s), "browser-abcdef01", "still the install it already was");
+    }));
+}
 
 // State a file can be in that is not a state to carry on from. Each one used to
 // have a quiet reading -- "this install has no id" -- and each quiet reading

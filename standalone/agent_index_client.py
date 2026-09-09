@@ -819,6 +819,44 @@ def tags():
         sys.exit(f"  could not read tags from {_shown(url)}: {type(e).__name__}")
 
 
+def install_id_for_this_install():
+    """Which install this is, in one place, in precedence order.
+
+    1. The id it already holds. An install that has registered IS that install,
+       and nothing may rename it: a new id opens a second set of rows beside
+       the ones it has written and strands them. This wins even over a valid
+       handoff, so a recreated container carrying a stale variable is still
+       itself -- which also means a stale MALFORMED one must not stop it
+       re-registering, and this order is what guarantees that.
+    2. The id the deploy handed over in AGENT_INSTALL_ID. /v1/installs returns
+       the id of the attempt it recorded when somebody clicked Deploy, and
+       whoever provisions the tenant passes it here; minting under it is what
+       lets the first report claim that click rather than counting as a second
+       attempt beside it.
+    3. A fresh random one, when nothing was handed over.
+
+    A handed-over id we cannot use FAILS CLOSED rather than falling back to
+    random -- but only in case 3's position, where there is no identity yet.
+    Quietly minting a random id writes it to state, state then wins case 1
+    forever, and a corrected variable could never claim that browser's attempt
+    again. Refusing costs one re-run; accepting costs the link permanently.
+    """
+    stored = load_state().get("install_id")
+    if stored:
+        return stored
+    handed = os.environ.get("AGENT_INSTALL_ID", "").strip()
+    if not handed:
+        return secrets.token_hex(16)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", handed):
+        sys.exit(f"  AGENT_INSTALL_ID={handed!r} is not an install id.\n"
+                 f"  It must match [A-Za-z0-9_-]{{8,64}} — it is the id /v1/installs\n"
+                 f"  returned when somebody clicked Deploy, and this install mints\n"
+                 f"  under it so its first report can claim that attempt.\n"
+                 f"  Nothing was minted. Fix the value, or unset it to mint an\n"
+                 f"  unlinked install on purpose, and run --register again.")
+    return handed
+
+
 def register(agent, argv):
     """Create this agent's row on the Index, so it has a page to report into.
 
@@ -870,35 +908,7 @@ def register(agent, argv):
     # move the old rows instead -- an owner's legacy installs all share the ''
     # bucket, so there is no way to tell which of them wrote what.
     hold_state_lock()
-    # Where this install's id comes from, in order: the one it already holds,
-    # then the one the deploy handed it, then a fresh random one.
-    #
-    # AGENT_INSTALL_ID is the middle case and the only one that is not local.
-    # /v1/installs hands the browser's attempt back its own id when somebody
-    # clicks Deploy; whoever provisions the tenant puts that id here, and
-    # minting under it is what lets the first report claim that exact attempt
-    # instead of adding a second row beside it.
-    #
-    # A malformed value FAILS CLOSED, and that is the whole point of this
-    # block. Quietly minting a random id instead would be unrecoverable: the
-    # random id is written to state, state outranks the handoff on every later
-    # run, and a corrected variable could never claim that browser's attempt
-    # again. Refusing costs one re-run; accepting costs the link permanently.
-    #
-    # Absent is different from wrong. Nothing was handed over, so there is
-    # nothing to be faithful to and a random id is correct.
-    handed = os.environ.get("AGENT_INSTALL_ID", "").strip()
-    if handed and not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", handed):
-        sys.exit(f"  AGENT_INSTALL_ID={handed!r} is not an install id.\n"
-                 f"  It must match [A-Za-z0-9_-]{{8,64}} — it is the id /v1/installs\n"
-                 f"  returned when somebody clicked Deploy, and this install mints\n"
-                 f"  under it so its first report can claim that attempt.\n"
-                 f"  Nothing was minted. Fix the value, or unset it to mint an\n"
-                 f"  unlinked install on purpose, and run --register again.")
-    # A stored id outranks the handoff: an install that has already reported IS
-    # that install, and a stale variable in a recreated container must not
-    # rename it and strand every row it wrote.
-    mine = load_state().get("install_id") or handed or secrets.token_hex(16)
+    mine = install_id_for_this_install()
     mint = {"label": agent, "install_id": mine}
     code, key_out = _post(API + "/v1/keys", mint, assertion)
     minted_install = str(key_out.get("install_id", ""))
