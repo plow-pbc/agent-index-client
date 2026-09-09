@@ -867,7 +867,29 @@ def register(agent, argv):
     # move the old rows instead -- an owner's legacy installs all share the ''
     # bucket, so there is no way to tell which of them wrote what.
     hold_state_lock()
-    mine = load_state().get("install_id") or secrets.token_hex(16)
+    # Where this install's id comes from, in order: the one it already holds,
+    # then the one the deploy handed it, then a fresh random one.
+    #
+    # AGENT_INSTALL_ID is the middle case and the only one that is not local.
+    # /v1/installs hands the browser's attempt back its own id when somebody
+    # clicks Deploy; whoever provisions the tenant puts that id here, and
+    # minting under it is what lets the first report claim that exact attempt
+    # instead of adding a second row beside it. Without it the person who
+    # clicked and the container that reported are two tries and one success.
+    #
+    # Never over a stored id: an install that has already reported is that
+    # install, and a stale variable in a recreated container must not rename it
+    # and strand every row it wrote.
+    #
+    # Validated to the same shape the Index accepts, because an id it refuses
+    # would fail the mint outright -- a random one is a working install with an
+    # unlinked attempt, which is strictly better than no install at all.
+    handed = os.environ.get("AGENT_INSTALL_ID", "").strip()
+    if handed and not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", handed):
+        print(f"  AGENT_INSTALL_ID={handed!r} is not an install id — ignoring it "
+              f"and minting a fresh one; this install's attempt stays unlinked")
+        handed = ""
+    mine = load_state().get("install_id") or handed or secrets.token_hex(16)
     mint = {"label": agent, "install_id": mine}
     code, key_out = _post(API + "/v1/keys", mint, assertion)
     minted_install = str(key_out.get("install_id", ""))

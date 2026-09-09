@@ -554,6 +554,40 @@ for (const [start, seed] of [
     }));
 }
 
+// The deploy handoff: the id the browser's Deploy click created, carried into
+// the tenant so the first report claims that attempt instead of adding a second
+// row beside it. Without this the person who clicked and the container that
+// reported are two tries and one success on their own agent's page.
+test("the id the deploy handed us is the id we mint under", () =>
+  withStandIns(async (s) => {
+    const one = volumeHome(s);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home,
+      { ...one.env, AGENT_INSTALL_ID: "browser-abcdef01" })).code, 0);
+    assert.equal(askedInstall(s), "browser-abcdef01",
+      "minted under the attempt's own id, so the report can claim that row");
+  }));
+
+test("a stored id outranks the handoff, and a bad handoff is ignored", () =>
+  withStandIns(async (s) => {
+    // An install that has already reported IS that install. A stale variable in
+    // a recreated container must not rename it and strand every row it wrote.
+    const one = volumeHome(s);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], one.home,
+      { ...one.env, AGENT_INSTALL_ID: "browser-abcdef01" })).code, 0);
+    const two = volumeHome(s, one.data);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], two.home,
+      { ...two.env, AGENT_INSTALL_ID: "browser-99999999" })).code, 0);
+    assert.equal(askedInstall(s), "browser-abcdef01", "still the install it already was");
+
+    // And a value the Index would refuse is dropped rather than sent: a random
+    // id is a working install with an unlinked attempt, which beats no install.
+    const three = volumeHome(s);
+    assert.equal((await clientAsync(["--register", "--agent", "purge-test"], three.home,
+      { ...three.env, AGENT_INSTALL_ID: "not an id!!" })).code, 0);
+    assert.match(String(askedInstall(s)), /^[A-Za-z0-9_-]{8,64}$/);
+    assert.notEqual(askedInstall(s), "not an id!!");
+  }));
+
 // State a file can be in that is not a state to carry on from. Each one used to
 // have a quiet reading -- "this install has no id" -- and each quiet reading
 // mints a second install and strands every row the first one wrote.
