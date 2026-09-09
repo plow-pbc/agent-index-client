@@ -13,16 +13,19 @@ Three calls, three payloads:
 - `--register` posts the page content you hand it — the agent id, plus whatever
   you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
   `--image` and `--install-url`. All of it is public: it *is* the agent's page.
-  It also sends one id for this install — random, made up here once and kept —
-  so the Index can tell two installs of one agent apart instead of adding them
-  together.
+  It also sends one id for this install — kept once it is chosen — so the Index
+  can tell two installs of one agent apart instead of adding them together. It
+  is random unless a deploy handed one over in `AGENT_INSTALL_ID`, in which case
+  it is the id of the Deploy click that started this install, so the Index can
+  count that person as having got it working.
 - A report posts day x model token counts, and nothing else.
 - `--story` posts the one story you wrote — its title, body, tags and images.
 
 **No prompts, no task text, no file paths, no costs.** The only thing *measured*
 off this machine and sent is the token counts. Everything else is what you
-typed, or that one install id — drawn from random bytes, not from anything
-about the machine, so it identifies the install and nothing else.
+typed, or that one install id — drawn from random bytes, or handed over by the
+deploy that created this install, and in neither case from anything about the
+machine: it identifies the install and nothing else.
 
 ## Install
 
@@ -234,6 +237,7 @@ anonymously.
 | `AGENT_INDEX_API` | A **bare loopback origin** for local development (`http://localhost:8787`), or unset. The published index is compiled in: where an agent's usage goes is a code change, not an environment one. |
 | `HERMES_HOME` | Hermes instance home holding `state.db`. Default `~/.hermes`, `~/.hermes-life`. Set it and the store must be there: naming a path with no `state.db` fails the run rather than reporting zero. |
 | `AGENT_ID` | Used when `--agent` is not passed. |
+| `AGENT_INSTALL_ID` | The id of the Deploy click that created this install, handed over by whoever provisioned it. `--register` mints under it, which is what lets the first report claim that click instead of counting as a second attempt. Unset means a random id and an unlinked attempt. A malformed value **refuses to mint** rather than falling back: a random id would be written to state, state outranks this variable afterwards, and the link could never be made. |
 
 ## Checking it works
 

@@ -21,13 +21,16 @@ Collects from two places, because neither alone covers a real machine:
 
 Sends, per call: --register posts the page content you hand it (agent id,
 name, blurb, repo, runtime, video, images, install-url), all of it public
-because it IS the agent's page, plus one id for this install -- random, made
-up here once and kept, so the Index can tell two installs of one agent apart
-instead of adding them together; a report posts day x model token counts and
-nothing else; --story posts the one story you wrote. No prompts, no task
-titles, no file paths, no costs -- the only thing MEASURED off this machine
-and sent is the token counts. Everything else is what you typed, or that one
-id, which is drawn from random bytes and says nothing about the machine.
+because it IS the agent's page, plus one id for this install -- chosen once and
+kept, so the Index can tell two installs of one agent apart instead of adding
+them together. That id is random unless a deploy handed one over in
+AGENT_INSTALL_ID, which is the id of the Deploy click that created this
+install; minting under it is what lets the first report claim that click. A
+report posts day x model token counts and nothing else; --story posts the one
+story you wrote. No prompts, no task titles, no file paths, no costs -- the
+only thing MEASURED off this machine and sent is the token counts. Everything
+else is what you typed, or that one id, which is random bytes or the click it
+came from, and says nothing about the machine.
 Reports use the stored Index-issued key; the Plow token is used only once to
 exchange for an assertion during registration.
 """
@@ -874,21 +877,27 @@ def register(agent, argv):
     # /v1/installs hands the browser's attempt back its own id when somebody
     # clicks Deploy; whoever provisions the tenant puts that id here, and
     # minting under it is what lets the first report claim that exact attempt
-    # instead of adding a second row beside it. Without it the person who
-    # clicked and the container that reported are two tries and one success.
+    # instead of adding a second row beside it.
     #
-    # Never over a stored id: an install that has already reported is that
-    # install, and a stale variable in a recreated container must not rename it
-    # and strand every row it wrote.
+    # A malformed value FAILS CLOSED, and that is the whole point of this
+    # block. Quietly minting a random id instead would be unrecoverable: the
+    # random id is written to state, state outranks the handoff on every later
+    # run, and a corrected variable could never claim that browser's attempt
+    # again. Refusing costs one re-run; accepting costs the link permanently.
     #
-    # Validated to the same shape the Index accepts, because an id it refuses
-    # would fail the mint outright -- a random one is a working install with an
-    # unlinked attempt, which is strictly better than no install at all.
+    # Absent is different from wrong. Nothing was handed over, so there is
+    # nothing to be faithful to and a random id is correct.
     handed = os.environ.get("AGENT_INSTALL_ID", "").strip()
     if handed and not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", handed):
-        print(f"  AGENT_INSTALL_ID={handed!r} is not an install id — ignoring it "
-              f"and minting a fresh one; this install's attempt stays unlinked")
-        handed = ""
+        sys.exit(f"  AGENT_INSTALL_ID={handed!r} is not an install id.\n"
+                 f"  It must match [A-Za-z0-9_-]{{8,64}} — it is the id /v1/installs\n"
+                 f"  returned when somebody clicked Deploy, and this install mints\n"
+                 f"  under it so its first report can claim that attempt.\n"
+                 f"  Nothing was minted. Fix the value, or unset it to mint an\n"
+                 f"  unlinked install on purpose, and run --register again.")
+    # A stored id outranks the handoff: an install that has already reported IS
+    # that install, and a stale variable in a recreated container must not
+    # rename it and strand every row it wrote.
     mine = load_state().get("install_id") or handed or secrets.token_hex(16)
     mint = {"label": agent, "install_id": mine}
     code, key_out = _post(API + "/v1/keys", mint, assertion)
