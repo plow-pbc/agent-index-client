@@ -888,6 +888,14 @@ def register(agent, argv):
     if images:
         body["images"] = images
 
+    # Identity BEFORE the first network write. A handed-over id we cannot use is
+    # a setup error, and exiting on it after posting the profile would leave the
+    # public agent record changed by a run that refused to finish -- the caller
+    # fixes the variable and re-runs, and the page has already moved underneath
+    # them. Nothing here touches the network, so it costs nothing to ask first.
+    hold_state_lock()
+    mine = install_id_for_this_install()
+
     assertion = index_assertion()
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
     if code != 200:
@@ -907,8 +915,6 @@ def register(agent, argv):
     # so those days read high until they age out of the window. Nothing can
     # move the old rows instead -- an owner's legacy installs all share the ''
     # bucket, so there is no way to tell which of them wrote what.
-    hold_state_lock()
-    mine = install_id_for_this_install()
     mint = {"label": agent, "install_id": mine}
     code, key_out = _post(API + "/v1/keys", mint, assertion)
     minted_install = str(key_out.get("install_id", ""))

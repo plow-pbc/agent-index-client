@@ -580,6 +580,8 @@ test("a malformed handoff refuses to mint rather than inventing an id", () =>
     assert.match(run.out, /AGENT_INSTALL_ID/, "and it says which value to fix");
     assert.equal(s.indexHits.filter((h) => h.path === "/v1/keys").length, 0,
       "nothing was minted");
+    assert.equal(s.indexHits.filter((h) => h.path === "/v1/agents").length, 0,
+      "and the public agent record was not touched by a run that refused to finish");
     assert.ok(!fs.existsSync(stateFile(one.data)), "and nothing was written to state");
   }));
 
