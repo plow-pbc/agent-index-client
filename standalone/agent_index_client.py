@@ -849,7 +849,12 @@ def register(agent, argv):
 
     assertion = index_assertion()
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
-    if code != 200:
+    # 409: somebody else published this id, so this is an INSTALL of their
+    # agent. The page is theirs to edit, but the Index takes usage from anyone's
+    # key on a registered agent -- so mint one and report as an installer.
+    # Exiting here left every installer 409ing hourly and never reporting.
+    joining = code == 409
+    if code != 200 and not joining:
         sys.exit(f"  registration failed: {code} {out}")
     # WHICH install is minting. It always says, and it says the same thing
     # every time once it has said it.
@@ -895,6 +900,10 @@ def register(agent, argv):
     # on disk is worse than not having moved at all -- and this is the run
     # somebody is watching.
     retire_legacy()
+    if joining:
+        print(f"  {agent} is published by someone else — reporting to it as an installer")
+        print("  Now run it on a timer to report usage.")
+        return 0
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on

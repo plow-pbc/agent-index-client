@@ -410,6 +410,23 @@ test("registration trades the Plow token for an assertion, and stores what the I
     assert.ok(!fs.existsSync(state + ".new"), "no temp file survives the write");
   }));
 
+// Installing somebody else's published agent: the Index 409s the claim, and
+// the install must still end up holding a key, or it never reports.
+test("registering an id somebody else owns still mints a key, as an installer", async () => {
+  const s = await standIns(0, true);
+  try {
+    const { home, env } = bootstrapHome(s);
+    const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(s.indexHits.map((h) => `${h.method} ${h.path}`),
+      ["POST /v1/agents", "POST /v1/keys"], "refused the claim, then minted anyway");
+    const state = path.join(home, ".agent-index", ".agent-index.json");
+    assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).key, MINTED_KEY);
+  } finally {
+    await s.close();
+  }
+});
+
 // --install-url is the one registration field a publisher can UNSET, so its
 // three states are checked at the wire rather than in the argv parser: a link
 // is sent, an empty one is sent, and an omitted flag says nothing at all. The
