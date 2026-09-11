@@ -23,7 +23,9 @@ Sends, per call: --register posts the page content you hand it (agent id,
 name, blurb, repo, runtime, video, images, install-url), all of it public
 because it IS the agent's page, plus one id for this install -- random, made
 up here once and kept, so the Index can tell two installs of one agent apart
-instead of adding them together; a report posts day x model token counts and
+instead of adding them together (on an id somebody else published the page is
+refused and kept as theirs, and only that install id is used, to mint this
+install's report key); a report posts day x model token counts and
 nothing else; --story posts the one story you wrote. No prompts, no task
 titles, no file paths, no costs -- the only thing MEASURED off this machine
 and sent is the token counts. Everything else is what you typed, or that one
@@ -849,7 +851,13 @@ def register(agent, argv):
 
     assertion = index_assertion()
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
-    if code != 200:
+    # 409: somebody else published this id -- JOINING, not publishing. The
+    # assertion proves who we are, not that the page is ours: it stays theirs,
+    # and all the assertion buys here is this install's report key, since the
+    # Index takes usage from anyone's key on a registered agent. Exiting here
+    # left every installer 409ing hourly and never reporting.
+    joining = code == 409
+    if code != 200 and not joining:
         sys.exit(f"  registration failed: {code} {out}")
     # WHICH install is minting. It always says, and it says the same thing
     # every time once it has said it.
@@ -895,6 +903,10 @@ def register(agent, argv):
     # on disk is worse than not having moved at all -- and this is the run
     # somebody is watching.
     retire_legacy()
+    if joining:
+        print(f"  {agent} is published by someone else — reporting to it as an installer")
+        print("  Now run it on a timer to report usage.")
+        return 0
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on

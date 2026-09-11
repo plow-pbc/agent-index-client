@@ -65,7 +65,7 @@ export type StandIns = {
  * permissive stand-in turns the bug this flow exists to prevent -- the Plow
  * token travelling to the Index -- into a green test.
  */
-export async function standIns(mintDelayMs = 0): Promise<StandIns> {
+export async function standIns(mintDelayMs = 0, agentTaken = false): Promise<StandIns> {
   const plowHits: Hit[] = [];
   const indexHits: Hit[] = [];
 
@@ -95,6 +95,8 @@ export async function standIns(mintDelayMs = 0): Promise<StandIns> {
       // would hide a client that stopped sending its install.
       const asked = String((body as { install_id?: unknown } | undefined)?.install_id || UNNAMED_INSTALL);
       if (path !== "/v1/keys") {
+        // The real Index's answer when this id's owner is somebody else.
+        if (agentTaken) return json(res, 409, { ok: false, error: "agent id is already registered to someone else" });
         return json(res, 200, { result: "registered", url: "https://agents.plow.co/purge-test" });
       }
       // A mint that holds the line, so a second registration is INSIDE the
