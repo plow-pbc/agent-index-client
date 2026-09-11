@@ -15,7 +15,9 @@ Three calls, three payloads:
   `--image` and `--install-url`. All of it is public: it *is* the agent's page.
   It also sends one id for this install — random, made up here once and kept —
   so the Index can tell two installs of one agent apart instead of adding them
-  together.
+  together. On an id somebody else published, the Index refuses the page
+  content and keeps theirs; only the install id is used, to mint this install's
+  report key.
 - A report posts day x model token counts, and nothing else.
 - `--story` posts the one story you wrote — its title, body, tags and images.
 
@@ -136,6 +138,14 @@ Register the agent once, then run it on a timer:
 sends that assertion with the id and page content. No name or handle is typed:
 the Index resolves the creator from Plow.
 
+The assertion says **who you are**, and the id decides what that buys:
+
+- **Publishing** — an id nobody holds, or one you already own: you become (or
+  stay) its owner, the page content is stored, and a report key is minted.
+- **Joining** — an id somebody else published: the Index refuses the page
+  (409) and it stays theirs. The assertion only mints this install's report
+  key, and your usage lands on their agent as an installer's.
+
 `--video` takes a YouTube **video id**, not a URL — the page embeds
 `youtube-nocookie.com/embed/<id>`.
 
@@ -200,9 +210,11 @@ The same rule covers agentsview: **installed and broken** stops the run,
 
 Bake the **client**. Never bake the **token**.
 
-`PLOW_AGENT_TOKEN` says which **agent** this is: each container already has one,
-scoped to that container's own agent, so nothing identifying belongs in an image
-layer. It does not say which **install** — one owner can run the same agent
+`PLOW_AGENT_TOKEN` says **who** runs this container: each container already has
+one, scoped to that container's own agent, so nothing identifying belongs in an
+image layer. It owns the page only for an agent you published; baked into an
+image others install, it makes each of them an installer (see Joining above).
+It does not say which **install** — one owner can run the same agent
 twice, and both containers hold a token for it. That is what
 `$HERMES_HOME/.agent-index.json` is for, and why it has to outlive the
 container.

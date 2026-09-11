@@ -355,8 +355,9 @@ test("a run with no credential fails before it does any work", () => {
 /** The two stand-ins, closed however the case ends. Every integration case
  *  below wants exactly this and nothing else, and the identical try/finally in
  *  each of them was one more place for a server to be left listening. */
-async function withStandIns<T>(body: (s: StandIns) => Promise<T>, mintDelayMs = 0): Promise<T> {
-  const s = await standIns(mintDelayMs);
+async function withStandIns<T>(body: (s: StandIns) => Promise<T>, mintDelayMs = 0,
+                                agentTaken = false): Promise<T> {
+  const s = await standIns(mintDelayMs, agentTaken);
   try {
     return await body(s);
   } finally {
@@ -412,9 +413,8 @@ test("registration trades the Plow token for an assertion, and stores what the I
 
 // Installing somebody else's published agent: the Index 409s the claim, and
 // the install must still end up holding a key, or it never reports.
-test("registering an id somebody else owns still mints a key, as an installer", async () => {
-  const s = await standIns(0, true);
-  try {
+test("registering an id somebody else owns still mints a key, as an installer", () =>
+  withStandIns(async (s) => {
     const { home, env } = bootstrapHome(s);
     const r = await clientAsync(["--register", "--agent", "purge-test"], home, env);
     assert.equal(r.code, 0, r.out);
@@ -422,10 +422,7 @@ test("registering an id somebody else owns still mints a key, as an installer", 
       ["POST /v1/agents", "POST /v1/keys"], "refused the claim, then minted anyway");
     const state = path.join(home, ".agent-index", ".agent-index.json");
     assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).key, MINTED_KEY);
-  } finally {
-    await s.close();
-  }
-});
+  }, 0, true));
 
 // --install-url is the one registration field a publisher can UNSET, so its
 // three states are checked at the wire rather than in the argv parser: a link
