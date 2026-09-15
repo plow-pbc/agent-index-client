@@ -20,6 +20,7 @@ Three calls, three payloads:
   report key.
 - A report posts day x model token counts, and nothing else.
 - `--story` posts the one story you wrote — its title, body, tags and images.
+- `--delete-story ID` removes a story you wrote, from any of your installs.
 
 **No prompts, no task text, no file paths, no costs.** The only thing *measured*
 off this machine and sent is the token counts. Everything else is what you
@@ -171,6 +172,9 @@ one back off the page.
     --title "Got $53.64 back from Amazon" \
     --body "Sat in a long support chat and got the refund." \
     --tag "Orders & returns"
+
+# Remove a story you wrote
+./agent_index_client.py --agent life --delete-story amazon-refund
 ```
 
 Read `--tags` before publishing and reuse an existing tag. "Orders & returns"
