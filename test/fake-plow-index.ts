@@ -17,7 +17,7 @@ export const MINTED_KEY = "aik_" + "m".repeat(43);           // pragma: allowlis
  *  install with no id of its own has always written. */
 const UNNAMED_INSTALL = "";
 
-export type Hit = { method: string; path: string; bearer: string; body?: unknown };
+export type Hit = { method: string; path: string; query: string; bearer: string; body?: unknown };
 
 function bearerOf(req: http.IncomingMessage): string {
   return String(req.headers["authorization"] || "");
@@ -70,8 +70,8 @@ export async function standIns(mintDelayMs = 0, agentTaken = false): Promise<Sta
   const indexHits: Hit[] = [];
 
   const plow = await listen((req, res) => {
-    const path = new URL(req.url || "/", "http://x").pathname;
-    plowHits.push({ method: req.method || "", path, bearer: bearerOf(req) });
+    const { pathname: path, search: query } = new URL(req.url || "/", "http://x");
+    plowHits.push({ method: req.method || "", path, query, bearer: bearerOf(req) });
     // The route the client asks for, with or without the /assertion suffix --
     // a rename must not turn this into a 404 that reads as a different failure.
     if (!path.startsWith("/v1/auth/index-identity")) return json(res, 404, {});
@@ -80,10 +80,10 @@ export async function standIns(mintDelayMs = 0, agentTaken = false): Promise<Sta
   });
 
   const index = await listen(async (req, res) => {
-    const path = new URL(req.url || "/", "http://x").pathname;
+    const { pathname: path, search: query } = new URL(req.url || "/", "http://x");
     const bearer = bearerOf(req);
     const body = await bodyOf(req);
-    indexHits.push({ method: req.method || "", path, bearer, body });
+    indexHits.push({ method: req.method || "", path, query, bearer, body });
     // Registration and minting are the assertion's job, and ONLY the
     // assertion's: a Plow token here is the leak, so it is a 401.
     if (path === "/v1/agents" || path === "/v1/keys") {

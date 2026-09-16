@@ -494,6 +494,25 @@ test("a report prefers the stored key even while a Plow token is exported", asyn
   }
 });
 
+test("--delete-story removes that one story with the stored key", async () => {
+  // A builder could publish and revise a story but had no command to take one
+  // down, so an old story stayed on their page (card 81c65c3cb2).
+  const s = await standIns();
+  try {
+    const home = homeWith(MINTED_KEY);       // already bootstrapped
+    const r = await clientAsync(["--agent", "purge-test", "--delete-story", "old-story"], home, {
+      PLOW_AGENT_TOKEN: undefined, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+    });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(s.indexHits.map((h) => `${h.method} ${h.path}${h.query}`),
+      ["DELETE /v1/stories?agent_id=purge-test&story_id=old-story"], "one delete, of that story");
+    assert.equal(s.indexHits[0].bearer, `Bearer ${MINTED_KEY}`, "carried by the key the Index issued");
+    assert.equal(s.plowHits.length, 0, "a delete never goes to Plow");
+  } finally {
+    await s.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Which INSTALL is reporting. The Index counts a day's usage under an install
 // rather than under the key that authenticated it, so everything below is

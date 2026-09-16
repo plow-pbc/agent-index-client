@@ -8,6 +8,7 @@
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
     agent_index_client.py --agent life --story ID --title T [--body B] [--tag T]...
+    agent_index_client.py --agent life --delete-story ID   # remove a story you wrote
     agent_index_client.py status                    # 0 registered, 3 not, 2 cannot tell
     agent_index_client.py --self-check
 
@@ -26,10 +27,11 @@ up here once and kept, so the Index can tell two installs of one agent apart
 instead of adding them together (on an id somebody else published the page is
 refused and kept as theirs, and only that install id is used, to mint this
 install's report key); a report posts day x model token counts and
-nothing else; --story posts the one story you wrote. No prompts, no task
-titles, no file paths, no costs -- the only thing MEASURED off this machine
-and sent is the token counts. Everything else is what you typed, or that one
-id, which is drawn from random bytes and says nothing about the machine.
+nothing else; --story posts the one story you wrote, and --delete-story removes
+one. No prompts, no task titles, no file paths, no costs -- the only thing
+MEASURED off this machine and sent is the token counts. Everything else is
+what you typed, or that one id, which is drawn from random bytes and says
+nothing about the machine.
 Reports use the stored Index-issued key; the Plow token is used only once to
 exchange for an assertion during registration.
 """
@@ -151,11 +153,11 @@ def _open_no_redirect(req, timeout=30):
     return urllib.request.build_opener(*handlers).open(req, timeout=timeout)
 
 
-def _post(url, body, headers):
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+def _post(url, body, headers, method="POST"):
+    req = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
                                  headers={"content-type": "application/json",
                                           "accept": "application/json", **headers},
-                                 method="POST")
+                                 method=method)
     try:
         with _open_no_redirect(req) as r:
             return r.status, json.loads(r.read() or b"{}")
@@ -937,6 +939,15 @@ def publish_story(agent, argv):
     sys.exit(0 if code == 200 else 1)
 
 
+def delete_story(agent, story_id):
+    """Remove one story this person wrote, whichever of their installs wrote it."""
+    code, out = _post(f"{API}/v1/stories?agent_id={agent}"
+                      f"&story_id={urllib.parse.quote(story_id, safe='')}",
+                      None, auth_headers(), method="DELETE")
+    print(f"  {code} {out}")
+    sys.exit(0 if code == 200 else 1)
+
+
 # Every option declared ONCE, in the set that says whether it takes a value;
 # what is merely "known" is the union of the two. The old pair listed most
 # flags twice, and that is exactly how --story came to be known but not
@@ -945,7 +956,7 @@ def publish_story(agent, argv):
 # exists to prevent.
 VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
                "--image", "--name", "--blurb", "--repo", "--runtime",
-               "--video", "--install-url"}
+               "--video", "--install-url", "--delete-story"}
 BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
 KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 
@@ -1037,6 +1048,8 @@ def main(argv):
         for t in tags():
             print(f"  {t['tag']:<28} {t['uses']} uses across {t['agents']} agent(s)")
         return
+    if "--delete-story" in argv:
+        return delete_story(agent, argv[argv.index("--delete-story") + 1])
     if "--story" in argv:
         return publish_story(agent, argv)
     # Decided BEFORE any work, not at the moment of sending. A run that
