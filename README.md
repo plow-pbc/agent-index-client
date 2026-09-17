@@ -126,7 +126,7 @@ running two of them would have them overwrite each other forever.
 
 ## Use
 
-Register the agent once, then run it on a timer:
+Register the agent once, then report every 5 minutes:
 
 ```bash
 ./agent_index_client.py --register --agent my-agent \
@@ -157,10 +157,10 @@ one back off the page.
 
 
 ```bash
-# Report usage. Run it on whatever schedule you like.
-# No sign-in step: a Plow container already carries PLOW_AGENT_TOKEN, and the
-# index asks Plow whose it is.
-./agent_index_client.py --agent life
+# Report usage every 5 minutes, so every agent on the Index is at most 5
+# minutes behind. No sign-in step: a Plow container already carries
+# PLOW_AGENT_TOKEN, and the index asks Plow whose it is.
+while :; do ./agent_index_client.py --agent life; sleep 300; done
 
 # See what it would send, without sending it
 ./agent_index_client.py --agent life --dry-run
@@ -200,7 +200,7 @@ That is deliberate, and it is the opposite of what this used to do. The server
 REPLACES a (day, model) total with what it is sent, so reporting what the other
 collector saw while this one is broken overwrites a correct number with a
 smaller one — the agent then reads as having done less work than it did, and
-nothing later corrects it. A missed run costs one hour and the next run carries
+nothing later corrects it. A missed run costs five minutes and the next run carries
 it; a wrong total that looks right costs the number itself.
 
 An **unset** `HERMES_HOME` is different: nobody claimed there is a Hermes store,

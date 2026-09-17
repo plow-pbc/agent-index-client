@@ -826,7 +826,7 @@ def register(agent, argv):
     Registration is refused a key we issued ourselves, because claiming an id
     is the one thing its owner cannot undo. It takes the container's Plow
     token, which only Plow can vouch for, so a stranger's whole path is: curl
-    the file, --register, then run it on a timer.
+    the file, --register, then run it every 5 minutes.
     """
     def opt(flag, default=None):
         return argv[argv.index(flag) + 1] if flag in argv else default
@@ -907,14 +907,14 @@ def register(agent, argv):
     retire_legacy()
     if joining:
         print(f"  {agent} is published by someone else — reporting to it as an installer")
-        print("  Now run it on a timer to report usage.")
+        print("  Now run it every 5 minutes to report usage.")
         return 0
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on
         # would recreate exactly the trap the server side just removed.
         print(f"  WARNING: some values were not stored: {out['dropped']}")
-    print("  Now run it on a timer to report usage.")
+    print("  Now run it every 5 minutes to report usage.")
     return 0
 
 
