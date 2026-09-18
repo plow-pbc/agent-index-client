@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Publish one agent's token usage to the Agent Index.
 
-    agent_index_client.py --register --agent life [--install-url URL]
+    agent_index_client.py --register --agent life [--install-url URL] [--logo URL]
     agent_index_client.py --agent life              # then: report usage
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
@@ -21,7 +21,7 @@ Collects from two places, because neither alone covers a real machine:
     zero.
 
 Sends, per call: --register posts the page content you hand it (agent id,
-name, blurb, repo, runtime, video, images, install-url), all of it public
+name, blurb, repo, runtime, video, images, install-url, logo), all of it public
 because it IS the agent's page, plus one id for this install -- random, made
 up here once and kept, so the Index can tell two installs of one agent apart
 instead of adding them together (on an id somebody else published the page is
@@ -840,6 +840,9 @@ def register(agent, argv):
     # "leave what is on record alone".
     if opt("--install-url") is not None:
         body["install_url"] = opt("--install-url")
+    # Same "" rule: `--logo ""` puts the first letter back on the board.
+    if opt("--logo") is not None:
+        body["logo"] = opt("--logo")
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
         # not a URL — passing a URL renders a broken player on a public page.
@@ -956,7 +959,7 @@ def delete_story(agent, story_id):
 # exists to prevent.
 VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
                "--image", "--name", "--blurb", "--repo", "--runtime",
-               "--video", "--install-url", "--delete-story"}
+               "--video", "--install-url", "--logo", "--delete-story"}
 BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
 KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 
