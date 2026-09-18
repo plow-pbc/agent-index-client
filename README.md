@@ -222,27 +222,40 @@ server's answer:
   200 {"ok":true,...}
 ```
 
-Two other outcomes both mean **empty collection** — the run had no token
-counts to send:
+A run that collected nothing prints these two lines instead, together, and
+exits `0`:
 
-- `nothing collected — check HERMES_HOME and that agentsview is installed` — no
-  collector returned any days.
-- `nothing to report yet — measuring from the next run` — same, and the client
-  posts `{"status": "pending"}` so the page can say measurement is pending
-  rather than imply the agent is idle.
+```
+  nothing collected — check HERMES_HOME and that agentsview is installed
+  nothing to report yet — measuring from the next run
+```
 
-Neither message says anything about your credential or your agent id: the run
-reached collection, which is past the credential check, but a failure at the
-POST itself prints the server's code instead. Empty collection has four ordinary
-causes:
+Both mean one thing — **empty collection**: no collector returned any days, so
+there are no token counts to send. The client then posts `{"status": "pending"}`
+so the page can say measurement is pending rather than imply the agent is idle.
+
+Neither line tells you anything about your credential or your agent id, and
+neither does the absence of an error. That pending post is **best-effort**: its
+result is discarded and any exception swallowed, deliberately, because it runs
+at container boot when the network is least likely to be up and losing it costs
+nothing. A `401` from a key the Index no longer accepts, a `404` from an
+unregistered id, an unreachable server — on an empty run all three print exactly
+what you see above and exit `0`. Only a run with days to send prints the
+server's answer.
+
+Empty collection has four ordinary causes:
 
 1. **No usage yet.** The agent has not run since you installed this.
 2. **A baselined Hermes store.** The collector reports deltas, so it needs a
    previous snapshot. On a first run it backfills the sessions whose first and
    last activity fall on the **same day** — every token in those was spent that
    day, so they can be placed — and baselines anything that spans days or is
-   undated, reporting it from the next run on. A first run on a store of
-   long-running sessions is therefore legitimately empty; the second run is not.
+   undated, reporting it from the next run on. So a first run against a store of
+   long-running sessions is legitimately empty. So is **every** run for an agent
+   that has been baselined and has not worked since: no new sessions, no
+   deltas, nothing to send. An idle agent reporting empty forever is the client
+   working correctly, and it is indistinguishable from the causes below by the
+   message alone.
 3. **The collector was not found.** `agentsview not installed — skipping that
    collector` is printed above the summary when it is missing. See
    [Claude Code and Codex](#claude-code-and-codex).
@@ -252,18 +265,30 @@ causes:
    agentsview saw. Set to a path that holds no `state.db` is a failure rather
    than an empty run: it says `configured but missing` and exits non-zero.
 
-To prove the credential and the id are fine, ask the two questions that answer
-only that:
+Two local checks narrow it down, and neither one touches the server:
 
 ```bash
-./agent_index_client.py status                       # 0 = registered, key found
-./agent_index_client.py --agent my-agent --dry-run   # collects for real, posts nothing
+./agent_index_client.py status                       # is there a key, in the dir this run will read
+./agent_index_client.py --agent my-agent --dry-run   # does any collector see usage
 ```
 
-`status` exits `0` and names the install when the key is where this run will
-look for it; `3` means not registered, and `2` means state is there and
-unreadable. A `--dry-run` that prints `"days": []` is empty collection, and a
-`status` of `0` beside it says the registration is intact.
+`status` reads one file and exits `0` naming the install, `3` for no key, `2`
+for state that is there and unreadable. It proves a key exists where this run
+will look for it — not that the Index still accepts it. `--dry-run` collects for
+real and prints the payload, then stops before the POST; `"days": []` is empty
+collection, and days in it mean the collectors are fine and the problem, if
+there is one, is further on.
+
+**What proves the credential and the id** is one of two things, and only these:
+
+- **A run that had something to send** — the two lines at the top of this
+  section. The server's code is printed there and the exit code follows it, `0`
+  on `200` and `1` on anything else, so a supervisor's log carries the `401` or
+  the `404` where an empty run carries nothing.
+- **The agent's page.** Open `https://aiworthusing.com/agent-index/<your-id>`
+  and look for numbers where it said `no data yet`.
+
+Until one of those happens, an empty run is not evidence that anything works.
 
 A collector that is **installed and broken** stops the run non-zero and reports
 nothing, on purpose: the server replaces a (day, model) total with what it is
