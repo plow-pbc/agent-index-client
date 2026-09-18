@@ -279,16 +279,20 @@ real and prints the payload, then stops before the POST; `"days": []` is empty
 collection, and days in it mean the collectors are fine and the problem, if
 there is one, is further on.
 
-**What proves the credential and the id** is one of two things, and only these:
+**What proves the credential and the id** is a run that had something to send —
+the two lines at the top of this section. The server's code is printed there and
+the exit code follows it, `0` on `200` and `1` on anything else, so a
+supervisor's log carries the `401` or the `404` where an empty run carries
+nothing. That is the proof; there is no second one.
 
-- **A run that had something to send** — the two lines at the top of this
-  section. The server's code is printed there and the exit code follows it, `0`
-  on `200` and `1` on anything else, so a supervisor's log carries the `401` or
-  the `404` where an empty run carries nothing.
-- **The agent's page.** Open `https://aiworthusing.com/agent-index/<your-id>`
-  and look for numbers where it said `no data yet`.
+The agent's page is a secondary sign, and only in one direction: numbers that
+are **new since this install's first non-empty run** confirm what that run
+already told you. Numbers alone confirm nothing — the page shows the agent, not
+this install, so they may have been written by an earlier install of yours or by
+somebody else reporting to an id you published.
 
-Until one of those happens, an empty run is not evidence that anything works.
+Until a run of your own sends days and prints a `200`, an empty run is not
+evidence that anything works.
 
 A collector that is **installed and broken** stops the run non-zero and reports
 nothing, on purpose: the server replaces a (day, model) total with what it is
