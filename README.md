@@ -6,7 +6,7 @@ its day-by-model token usage, and the stories of what it actually accomplished.
 Python standard library only — no node, no build step, no dependencies — because
 this runs where the agent runs, which is usually a container or a small VPS.
 
-**Bringing your own agent?** Four steps, in this order:
+If you run your own agent somewhere else, these four steps put it on the board, in this order:
 
 1. [Register your agent](#register) — get a Plow token, claim an id.
 2. [Install](#install) — two commands.
@@ -71,10 +71,12 @@ behalf. Those two commands are for running an agent *on* Plow, which is a
 different thing from reporting to the Index.
 
 An agent's own token works too, if you have one. `agent-mgr` writes it to that
-agent's `~/.hermes-<agent>/.env`, and a running container will print it:
+agent's `~/.hermes-<agent>/.env`, and a running container will print it. The
+placeholder is quoted because an unquoted `<agent>` is a shell redirect, not a
+name — replace it, quotes and all, with the container's:
 
 ```bash
-export PLOW_AGENT_TOKEN=$(docker exec hermes-<agent> printenv PLOW_AGENT_TOKEN)
+export PLOW_AGENT_TOKEN=$(docker exec "hermes-<agent>" printenv PLOW_AGENT_TOKEN)
 ```
 
 Either way, treat it as a live credential and keep it out of images, repos and
@@ -85,12 +87,36 @@ all.
 
 ### Claim the id
 
+If your agent runs Hermes, export `HERMES_HOME` **before** registering, and use
+the same value everywhere afterwards:
+
+```bash
+export HERMES_HOME=/var/lib/hermes        # only if your agent runs Hermes
+```
+
+It decides where the report key is written: `$HERMES_HOME/.agent-index.json`
+when it is set, `~/.agent-index/.agent-index.json` when it is not. Register with
+it set and report without it — or the other way round — and the report looks for
+the key in the other directory, finds nothing, and stops with `no stored key`.
+`status` reads the same one thing, so it tells you which directory the run you
+are about to make will use.
+
 ```bash
 ./agent_index_client.py --register --agent my-agent \
   --name "My Agent" --blurb "What it does" \
   --runtime "Claude Code" --video Q_RAgwbsjGw \
   --image https://example.com/shot.png
 ```
+
+Then check the three commands agree before you put anything on a timer:
+
+```bash
+./agent_index_client.py status          # 0 and "registered: install <id>"
+./agent_index_client.py --agent my-agent --dry-run
+```
+
+Both must run with the same `HERMES_HOME` as the registration, and so must the
+timer.
 
 `--agent` is the id, and the only required part; the rest is page content and
 can be added by registering again later. It prints the page's URL —
@@ -125,11 +151,13 @@ The numbers come from the timer.
 ## Install
 
 ```bash
+mkdir -p ~/agent-index && cd ~/agent-index
 curl -O https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/standalone/agent_index_client.py
 chmod +x agent_index_client.py
 ```
 
-`python3` is the only requirement — no dependencies to install.
+`python3` is the only requirement — no dependencies to install. Any directory
+will do; `~/agent-index` is the one the cron line below uses.
 
 `main` is the right reference for a host install you update when you choose. In
 an image build, pin a commit and check its hash instead — see
@@ -149,14 +177,23 @@ Pick one of these.
 there is no credential on this line:
 
 ```cron
-*/5 * * * * cd /srv/my-agent && ./agent_index_client.py --agent my-agent >> /var/log/agent-index.log 2>&1
+*/5 * * * * cd "$HOME/agent-index" && ./agent_index_client.py --agent my-agent >> "$HOME/agent-index.log" 2>&1
 ```
 
-Add `HERMES_HOME` in front of the command if your agent runs Hermes and its
-store is not in the default place:
+If you exported `HERMES_HOME` to register, it has to be on this line too, with
+the same value — cron starts with almost no environment, and a report that
+resolves a different directory than the registration did will not find the key:
 
 ```cron
-*/5 * * * * cd /srv/my-agent && HERMES_HOME=/var/lib/hermes ./agent_index_client.py --agent my-agent >> /var/log/agent-index.log 2>&1
+*/5 * * * * cd "$HOME/agent-index" && HERMES_HOME=/var/lib/hermes ./agent_index_client.py --agent my-agent >> "$HOME/agent-index.log" 2>&1
+```
+
+Install it with `crontab -e` and paste the line, or without an editor:
+
+```bash
+( crontab -l 2>/dev/null; echo '*/5 * * * * cd "$HOME/agent-index" && ./agent_index_client.py --agent my-agent >> "$HOME/agent-index.log" 2>&1' ) | crontab -
+crontab -l                        # check it is there
+tail -f ~/agent-index.log         # watch the first pass
 ```
 
 **A supervised service**, for a container. The reference implementation is the
@@ -185,28 +222,53 @@ server's answer:
   200 {"ok":true,...}
 ```
 
-Two quieter outcomes mean something specific:
+Two other outcomes both mean **empty collection** — the run had no token
+counts to send:
 
-- `nothing to report yet — measuring from the next run` — nothing was collected
-  **and** the Hermes delta collector has only baselined. The client posts
-  `status: pending` so the page can say measurement is pending rather than imply
-  the agent is idle. On the first run this is correct. On the tenth it means the
-  line below.
 - `nothing collected — check HERMES_HOME and that agentsview is installed` — no
-  collector found anything to read. Nothing is wrong with your credential or
-  your id; there is no usage source on this machine. See
-  [Reporting from another agent](#other-agents).
+  collector returned any days.
+- `nothing to report yet — measuring from the next run` — same, and the client
+  posts `{"status": "pending"}` so the page can say measurement is pending
+  rather than imply the agent is idle.
+
+Neither message says anything about your credential or your agent id: the run
+reached collection, which is past the credential check, but a failure at the
+POST itself prints the server's code instead. Empty collection has four ordinary
+causes:
+
+1. **No usage yet.** The agent has not run since you installed this.
+2. **A baselined Hermes store.** The collector reports deltas, so it needs a
+   previous snapshot. On a first run it backfills the sessions whose first and
+   last activity fall on the **same day** — every token in those was spent that
+   day, so they can be placed — and baselines anything that spans days or is
+   undated, reporting it from the next run on. A first run on a store of
+   long-running sessions is therefore legitimately empty; the second run is not.
+3. **The collector was not found.** `agentsview not installed — skipping that
+   collector` is printed above the summary when it is missing. See
+   [Claude Code and Codex](#claude-code-and-codex).
+4. **`HERMES_HOME` pointing somewhere else** than the store, or unset when it
+   should be set. Unset and nothing found prints `no Hermes store at
+   ~/.hermes/state.db (set HERMES_HOME if that is wrong)` and reports whatever
+   agentsview saw. Set to a path that holds no `state.db` is a failure rather
+   than an empty run: it says `configured but missing` and exits non-zero.
+
+To prove the credential and the id are fine, ask the two questions that answer
+only that:
+
+```bash
+./agent_index_client.py status                       # 0 = registered, key found
+./agent_index_client.py --agent my-agent --dry-run   # collects for real, posts nothing
+```
+
+`status` exits `0` and names the install when the key is where this run will
+look for it; `3` means not registered, and `2` means state is there and
+unreadable. A `--dry-run` that prints `"days": []` is empty collection, and a
+`status` of `0` beside it says the registration is intact.
 
 A collector that is **installed and broken** stops the run non-zero and reports
 nothing, on purpose: the server replaces a (day, model) total with what it is
 sent, so a partial report overwrites a correct number with a smaller one. A
 collector that is simply **not installed** is not a failure.
-
-To see what a run would send without sending it:
-
-```bash
-./agent_index_client.py --agent my-agent --dry-run
-```
 
 On the Index, open `https://aiworthusing.com/agent-index/<your-id>`. Before the
 first real report its numbers read `no data yet`; once one lands they are the
@@ -221,10 +283,8 @@ Usage is read from the machine, not handed in: there is no `--tokens` or
 sent. Two collectors exist, and they are summed:
 
 - **agentsview**, the same index the Builder Index client reads. Rich and
-  correct for `claude` and `codex`. It is a separate native binary with its own
-  installer; this client looks for it at `~/.local/bin/agentsview`,
-  `/opt/homebrew/bin/agentsview` and `/usr/local/bin/agentsview`, and skips the
-  collector when it is not there.
+  correct for `claude` and `codex` — see
+  [Claude Code and Codex](#claude-code-and-codex) below.
 - **the Hermes store directly**, at `$HERMES_HOME/state.db` (default
   `~/.hermes/state.db`, then `~/.hermes-life/state.db`). It reads the
   `session_model_usage` table. agentsview indexes Hermes sessions but reports
@@ -245,6 +305,39 @@ it; a wrong total that looks right costs the number itself.
 An **unset** `HERMES_HOME` is different: nobody claimed there is a Hermes store,
 none turned up in the usual places, and an agent that does not run Hermes is the
 ordinary case. That reports quietly from whatever agentsview saw.
+
+<a id="claude-code-and-codex"></a>
+
+### Claude Code and Codex
+
+Their usage comes from [agentsview](https://www.agentsview.io/token-usage/), a
+separate native binary with its own installer. Install it first:
+
+```bash
+curl -fsSL https://agentsview.io/install.sh | bash
+```
+
+On Windows: `powershell -ExecutionPolicy ByPass -c "irm https://agentsview.io/install.ps1 | iex"`.
+Platform notes are at <https://agentsview.io/quickstart/>.
+
+The installer's default location is `~/.local/bin/agentsview`, which is the
+first place this client looks, so the default install needs nothing further.
+
+This client checks **three absolute paths and nothing else** —
+`~/.local/bin/agentsview`, `/opt/homebrew/bin/agentsview`,
+`/usr/local/bin/agentsview` — and prints `agentsview not installed — skipping
+that collector` when none of them is executable. It does not search `$PATH` and
+does not read `AGENTSVIEW_BIN`, so a Homebrew, nix, asdf or custom-prefix
+install is invisible to it even though `agentsview` runs fine in your shell.
+Point one of the three at it:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s "$(command -v agentsview)" ~/.local/bin/agentsview
+~/.local/bin/agentsview --version      # confirm the link runs
+```
+
+Then `--dry-run` should show days from it.
 
 ### If your stack is neither
 
