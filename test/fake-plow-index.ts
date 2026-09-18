@@ -31,6 +31,8 @@ async function bodyOf(req: http.IncomingMessage): Promise<unknown> {
   const raw = await new Promise<string>((r) => {
     let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => r(b));
   });
+  // A logo upload is the image itself; everything else the client sends is JSON.
+  if (req.headers["content-type"] === "application/octet-stream") return raw;
   return raw ? JSON.parse(raw) : undefined;
 }
 
@@ -86,6 +88,10 @@ export async function standIns(mintDelayMs = 0, agentTaken = false): Promise<Sta
     indexHits.push({ method: req.method || "", path, query, bearer, body });
     // Registration and minting are the assertion's job, and ONLY the
     // assertion's: a Plow token here is the leak, so it is a 401.
+    if (path === "/v1/agent-logo") {
+      if (bearer !== `Bearer ${ASSERTION}`) return json(res, 401, { error: "the Index takes an assertion" });
+      return json(res, 200, { ok: true, logo: "https://index.example/v1/agent-logos/u.png" });
+    }
     if (path === "/v1/agents" || path === "/v1/keys") {
       if (bearer !== `Bearer ${ASSERTION}`) {
         return json(res, 401, { error: "the Index takes an assertion, not a Plow token" });

@@ -424,31 +424,55 @@ test("registering an id somebody else owns still mints a key, as an installer", 
     assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).key, MINTED_KEY);
   }, 0, true));
 
-// --install-url is the one registration field a publisher can UNSET, so its
-// three states are checked at the wire rather than in the argv parser: a link
-// is sent, an empty one is sent, and an omitted flag says nothing at all. The
-// server reads absent as "leave what is on record alone", so a client that
+// --install-url and --logo are the registration fields a publisher can UNSET,
+// so their three states are checked at the wire rather than in the argv parser:
+// a link is sent, an empty one is sent, and an omitted flag says nothing at all.
+// The server reads absent as "leave what is on record alone", so a client that
 // dropped the empty value -- as it does for every other empty field -- would
 // leave an owner no way to take a bad link off a page anyone can read.
-test("--install-url sends a link, sends a clear, and stays silent when omitted", async () => {
-  for (const [label, args, sent] of [
-    ["a link is sent", ["--install-url", "https://example.com/how-to-install"], "https://example.com/how-to-install"],
-    ["an empty one is sent, and clears", ["--install-url", ""], ""],
-    ["an omitted flag must not clear a tutorial the owner set earlier", [], undefined],
-  ] as const) {
-    const s = await standIns();
-    try {
-      const { home, env } = bootstrapHome(s);
-      const r = await clientAsync(["--register", "--agent", "purge-test", ...args], home, env);
-      assert.equal(r.code, 0, r.out);
-      const body = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
-      if (sent === undefined) assert.ok(!("install_url" in body), label);
-      else assert.equal(body.install_url, sent, label);
-    } finally {
-      await s.close();
+for (const [flag, field] of [["--install-url", "install_url"], ["--logo", "logo"]] as const) {
+  test(`${flag} sends a link, sends a clear, and stays silent when omitted`, async () => {
+    for (const [label, args, sent] of [
+      ["a link is sent", [flag, "https://example.com/x"], "https://example.com/x"],
+      ["an empty one is sent, and clears", [flag, ""], ""],
+      ["an omitted flag must not clear what the owner set earlier", [], undefined],
+    ] as const) {
+      await withStandIns(async (s) => {
+        const { home, env } = bootstrapHome(s);
+        const r = await clientAsync(["--register", "--agent", "purge-test", ...args], home, env);
+        assert.equal(r.code, 0, r.out);
+        const body = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
+        if (sent === undefined) assert.ok(!(field in body), label);
+        else assert.equal(body[field], sent, label);
+      });
     }
-  }
-});
+  });
+}
+
+// A --logo that is not a link is a file here, uploaded the way
+// `plow-agents profile --photo` uploads one: the bytes, after the listing is
+// written, under the same assertion -- and a file that cannot be read stops
+// the run before anything is sent.
+test("--logo with a local file uploads it after registering, and never as a link", () =>
+  withStandIns(async (s) => {
+    const { home, env } = bootstrapHome(s);
+    const file = path.join(home, "logo.png");
+    fs.writeFileSync(file, "PNG BYTES");
+    const r = await clientAsync(["--register", "--agent", "purge-test", "--logo", file], home, env);
+    assert.equal(r.code, 0, r.out);
+    const agents = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
+    assert.ok(!("logo" in agents), "a file path is never sent as the logo link");
+    const up = s.indexHits.find((h) => h.path === "/v1/agent-logo");
+    assert.equal(up?.body, "PNG BYTES", "the file's bytes are the upload");
+    assert.equal(up?.bearer, `Bearer ${ASSERTION}`, "under the owner's assertion");
+    assert.equal(up?.query, "?agent_id=purge-test");
+    assert.ok(s.indexHits.indexOf(up!) > s.indexHits.findIndex((h) => h.path === "/v1/agents"), "after the listing exists");
+
+    const before = s.indexHits.length;
+    const missing = await clientAsync(["--register", "--agent", "purge-test", "--logo", path.join(home, "nope.png")], home, env);
+    assert.notEqual(missing.code, 0, "an unreadable file fails the run");
+    assert.equal(s.indexHits.length, before, "and nothing was sent");
+  }));
 
 test("every later report carries the stored key alone, and never goes back to Plow", () =>
   withStandIns(async (s) => {

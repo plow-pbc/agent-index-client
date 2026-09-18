@@ -12,7 +12,7 @@ Three calls, three payloads:
 
 - `--register` posts the page content you hand it — the agent id, plus whatever
   you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
-  `--image` and `--install-url`. All of it is public: it *is* the agent's page.
+  `--image`, `--install-url` and `--logo`. All of it is public: it *is* the agent's page.
   It also sends one id for this install — random, made up here once and kept —
   so the Index can tell two installs of one agent apart instead of adding them
   together. On an id somebody else published, the Index refuses the page
@@ -154,6 +154,12 @@ The assertion says **who you are**, and the id decides what that buys:
 step by step. Community agents have no cloud deploy path, so it is what their
 Index page links to instead; an https link only, and `--install-url ""` takes
 one back off the page.
+
+`--logo` is the square picture the leaderboard shows for this agent instead of
+its first letter, set the way a Plow profile photo is: a local image file
+(PNG, JPEG, GIF or WebP, up to 4 MB), which the Index stores and serves, or a
+public https link to one. Run it again to change it, or `--logo ""` to go back
+to the letter. Only the agent's owner can change it.
 
 
 ```bash

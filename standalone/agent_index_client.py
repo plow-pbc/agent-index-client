@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Publish one agent's token usage to the Agent Index.
 
-    agent_index_client.py --register --agent life [--install-url URL]
+    agent_index_client.py --register --agent life [--install-url URL] [--logo URL|FILE]
     agent_index_client.py --agent life              # then: report usage
     agent_index_client.py --agent life --dry-run    # show what would be sent
     agent_index_client.py --agent life --tags       # tags already in use
@@ -21,7 +21,7 @@ Collects from two places, because neither alone covers a real machine:
     zero.
 
 Sends, per call: --register posts the page content you hand it (agent id,
-name, blurb, repo, runtime, video, images, install-url), all of it public
+name, blurb, repo, runtime, video, images, install-url, logo), all of it public
 because it IS the agent's page, plus one id for this install -- random, made
 up here once and kept, so the Index can tell two installs of one agent apart
 instead of adding them together (on an id somebody else published the page is
@@ -154,7 +154,9 @@ def _open_no_redirect(req, timeout=30):
 
 
 def _post(url, body, headers, method="POST"):
-    req = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
+    # bytes go as they are (a logo upload); anything else is JSON.
+    data = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data,
                                  headers={"content-type": "application/json",
                                           "accept": "application/json", **headers},
                                  method=method)
@@ -820,6 +822,10 @@ def tags():
         sys.exit(f"  could not read tags from {_shown(url)}: {type(e).__name__}")
 
 
+# The server's cap: Vercel refuses a request body over 4.5 MB.
+LOGO_MAX_BYTES = 4 * 1024 * 1024
+
+
 def register(agent, argv):
     """Create this agent's row on the Index, so it has a page to report into.
 
@@ -838,8 +844,23 @@ def register(agent, argv):
     # link off a page anyone can read, and dropping it here would leave them
     # with no way to. The server treats "" as a clear and an absent field as
     # "leave what is on record alone".
-    if opt("--install-url") is not None:
-        body["install_url"] = opt("--install-url")
+    # --logo takes a link or a local file, the way `plow-agents profile --photo`
+    # does. A file is read now, before anything is sent, so one that cannot be
+    # uploaded never leaves a registration half done; it goes up after it.
+    logo = opt("--logo")
+    logo_file = None
+    if logo and urllib.parse.urlsplit(logo).scheme.lower() not in ("http", "https"):
+        try:
+            with open(logo, "rb") as f:
+                logo_file = f.read(LOGO_MAX_BYTES + 1)
+        except OSError as e:
+            sys.exit(f"  cannot read --logo {logo}: {e.strerror}")
+        if len(logo_file) > LOGO_MAX_BYTES:
+            sys.exit(f"  --logo {logo} is larger than {LOGO_MAX_BYTES // (1024 * 1024)} MB")
+        logo = None
+    for flag, field, value in (("--install-url", "install_url", opt("--install-url")), ("--logo", "logo", logo)):
+        if value is not None:
+            body[field] = value
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
         # not a URL — passing a URL renders a broken player on a public page.
@@ -910,6 +931,12 @@ def register(agent, argv):
         print("  Now run it every 5 minutes to report usage.")
         return 0
     print(f"  {out.get('result')} {agent} — {out.get('url')}")
+    if logo_file is not None:
+        code, up = _post(f"{API}/v1/agent-logo?agent_id={agent}", logo_file,
+                         {**assertion, "content-type": "application/octet-stream"})
+        if code != 200:
+            sys.exit(f"  logo upload failed: {code} {up}")
+        print(f"  logo — {up.get('logo')}")
     if out.get("dropped"):
         # The server tells us what it threw away; passing that silently on
         # would recreate exactly the trap the server side just removed.
@@ -956,7 +983,7 @@ def delete_story(agent, story_id):
 # exists to prevent.
 VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
                "--image", "--name", "--blurb", "--repo", "--runtime",
-               "--video", "--install-url", "--delete-story"}
+               "--video", "--install-url", "--logo", "--delete-story"}
 BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
 KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 
