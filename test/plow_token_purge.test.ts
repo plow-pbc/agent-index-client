@@ -449,6 +449,31 @@ for (const [flag, field] of [["--install-url", "install_url"], ["--logo", "logo"
   });
 }
 
+// A --logo that is not a link is a file here, uploaded the way
+// `plow-agents profile --photo` uploads one: the bytes, after the listing is
+// written, under the same assertion -- and a file that cannot be read stops
+// the run before anything is sent.
+test("--logo with a local file uploads it after registering, and never as a link", () =>
+  withStandIns(async (s) => {
+    const { home, env } = bootstrapHome(s);
+    const file = path.join(home, "logo.png");
+    fs.writeFileSync(file, "PNG BYTES");
+    const r = await clientAsync(["--register", "--agent", "purge-test", "--logo", file], home, env);
+    assert.equal(r.code, 0, r.out);
+    const agents = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
+    assert.ok(!("logo" in agents), "a file path is never sent as the logo link");
+    const up = s.indexHits.find((h) => h.path === "/v1/agent-logo");
+    assert.equal(up?.body, "PNG BYTES", "the file's bytes are the upload");
+    assert.equal(up?.bearer, `Bearer ${ASSERTION}`, "under the owner's assertion");
+    assert.equal(up?.query, "?agent_id=purge-test");
+    assert.ok(s.indexHits.indexOf(up!) > s.indexHits.findIndex((h) => h.path === "/v1/agents"), "after the listing exists");
+
+    const before = s.indexHits.length;
+    const missing = await clientAsync(["--register", "--agent", "purge-test", "--logo", path.join(home, "nope.png")], home, env);
+    assert.notEqual(missing.code, 0, "an unreadable file fails the run");
+    assert.equal(s.indexHits.length, before, "and nothing was sent");
+  }));
+
 test("every later report carries the stored key alone, and never goes back to Plow", () =>
   withStandIns(async (s) => {
     const { home, env } = bootstrapHome(s);

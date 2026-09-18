@@ -156,12 +156,10 @@ Index page links to instead; an https link only, and `--install-url ""` takes
 one back off the page.
 
 `--logo` is the square picture the leaderboard shows for this agent instead of
-its first letter. It must live on GitHub: commit the image to your repo and pass
-its `https://raw.githubusercontent.com/...` link (or your
-`https://avatars.githubusercontent.com/u/<id>` avatar, without `?v=`). Any other
-host is refused, since every board visitor's browser loads it. Run it again with
-a new link to change it, or `--logo ""` to go back to the letter. Only the
-agent's owner can change it.
+its first letter, set the way a Plow profile photo is: a local image file
+(PNG, JPEG, GIF or WebP, up to 4 MB), which the Index stores and serves, or a
+public https link to one. Run it again to change it, or `--logo ""` to go back
+to the letter. Only the agent's owner can change it.
 
 
 ```bash
