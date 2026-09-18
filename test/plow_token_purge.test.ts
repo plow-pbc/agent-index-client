@@ -437,17 +437,14 @@ for (const [flag, field] of [["--install-url", "install_url"], ["--logo", "logo"
       ["an empty one is sent, and clears", [flag, ""], ""],
       ["an omitted flag must not clear what the owner set earlier", [], undefined],
     ] as const) {
-      const s = await standIns();
-      try {
+      await withStandIns(async (s) => {
         const { home, env } = bootstrapHome(s);
         const r = await clientAsync(["--register", "--agent", "purge-test", ...args], home, env);
         assert.equal(r.code, 0, r.out);
         const body = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
         if (sent === undefined) assert.ok(!(field in body), label);
         else assert.equal(body[field], sent, label);
-      } finally {
-        await s.close();
-      }
+      });
     }
   });
 }

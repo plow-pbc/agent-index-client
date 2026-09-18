@@ -838,11 +838,9 @@ def register(agent, argv):
     # link off a page anyone can read, and dropping it here would leave them
     # with no way to. The server treats "" as a clear and an absent field as
     # "leave what is on record alone".
-    if opt("--install-url") is not None:
-        body["install_url"] = opt("--install-url")
-    # Same "" rule: `--logo ""` puts the first letter back on the board.
-    if opt("--logo") is not None:
-        body["logo"] = opt("--logo")
+    for flag, field in (("--install-url", "install_url"), ("--logo", "logo")):
+        if opt(flag) is not None:
+            body[field] = opt(flag)
     if opt("--video"):
         # The page embeds youtube-nocookie.com/embed/<id>, so this is an id,
         # not a URL — passing a URL renders a broken player on a public page.
