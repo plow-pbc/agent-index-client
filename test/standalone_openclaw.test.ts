@@ -43,8 +43,9 @@ print(json.dumps(namespace["FAILURES"]))
   return JSON.parse(days);
 }
 
-const usage = (model: string, u: object, timestamp = "2026-09-23T11:52:38.505Z") =>
-  ({ type: "message", timestamp, message: { role: "assistant", model, usage: u } });
+let call = 0;
+const usage = (model: string, u: object, timestamp = "2026-09-23T11:52:38.505Z", responseId = `gen-${++call}`) =>
+  ({ type: "message", timestamp, message: { role: "assistant", model, responseId, usage: u } });
 
 test("usage lands under its day and model, events add up, and a turn without usage adds no row", () => {
   const days = collected(store([
@@ -54,6 +55,15 @@ test("usage lands under its day and model, events add up, and a turn without usa
   ]));
   assert.deepEqual(days, {
     "2026-09-23": { "z-ai/glm-5.2": { input: 30, output: 3, cache_read: 5, cache_write: 7 } },
+  });
+});
+
+test("the same call is counted once, however many times the store repeats it", () => {
+  // A checkpoint fork, or a store copied between roots, repeats the event.
+  const once = usage("z-ai/glm-5.2", { input: 10, output: 1, cacheRead: 0, cacheWrite: 0 }, undefined, "gen-same");
+  const days = collected(store([once, once, JSON.parse(JSON.stringify(once))]));
+  assert.deepEqual(days["2026-09-23"], {
+    "z-ai/glm-5.2": { input: 10, output: 1, cache_read: 0, cache_write: 0 },
   });
 });
 

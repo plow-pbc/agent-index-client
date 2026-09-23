@@ -597,10 +597,15 @@ def from_openclaw(days, state=None):
     if configured and not stores:
         FAILURES.append(f"openclaw: no store under {root} (OPENCLAW_STATE_DIR names it)")
         return {}
-    # `created_at` is epoch milliseconds; the window is the same one the other
-    # collectors use, and trimming in SQL keeps a long-lived store cheap to read.
-    since = int((time.time() - days * 86400) * 1000)
+    # `created_at` is epoch milliseconds, and the cutoff is the START of the
+    # oldest local day in the window, not the instant `days` ago: buckets are
+    # local calendar days, and cutting mid-day would post that day's tail as if
+    # it were the whole day -- which the server would then store in place of
+    # the complete total it already holds.
+    oldest = datetime.date.today() - datetime.timedelta(days=days)
+    since = int(datetime.datetime.combine(oldest, datetime.time.min).timestamp() * 1000)
     out = defaultdict(lambda: defaultdict(lambda: dict.fromkeys(KEYS, 0)))
+    seen = set()
     for store in stores:
         try:
             db = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
@@ -615,19 +620,29 @@ def from_openclaw(days, state=None):
             continue
         for raw, created_at in rows:
             try:
-                message = (json.loads(raw) or {}).get("message") or {}
+                event = json.loads(raw) or {}
             except (ValueError, TypeError):
                 continue
+            message = event.get("message") or {}
             usage = message.get("usage")
             if not isinstance(usage, dict):
                 continue
+            # One LLM call, counted once. A checkpoint fork or a store copied
+            # between roots repeats the same event, and `responseId` is what
+            # the canonical collector (reporter/openclaw.ts) keys on to tell
+            # those apart from two calls that merely look alike.
+            response = message.get("responseId")
+            if response is not None:
+                if response in seen:
+                    continue
+                seen.add(response)
             # The event's own timestamp when it has one -- `created_at` is when
             # the row was written -- and the LOCAL calendar date either way, the
             # rule reporter/openclaw.ts already follows: a UTC date splits one
             # user-perceived day in two near local midnight, and the same moment
             # would land on a different dashboard day than this machine's
             # claude and codex rows.
-            stamp = _stamp_ms(json.loads(raw).get("timestamp"), created_at)
+            stamp = _stamp_ms(event.get("timestamp"), created_at)
             date = datetime.datetime.fromtimestamp(stamp / 1000).date().isoformat()
             row = out[date][message.get("model") or "unknown"]
             for key, field in (("input", "input"), ("output", "output"),
