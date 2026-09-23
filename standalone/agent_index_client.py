@@ -12,13 +12,16 @@
     agent_index_client.py status                    # 0 registered, 3 not, 2 cannot tell
     agent_index_client.py --self-check
 
-Collects from two places, because neither alone covers a real machine:
+Collects from three places, because none alone covers a real machine:
   * agentsview, the same index the Builder Index client reads. Rich and correct
     for claude and codex. Measured on v0.38.1: grok reports zero, fixed
     upstream in 0.39.0; hermes reports zero with no fix known.
   * the Hermes store directly, because of that hermes gap — Hermes is what our
     own agents run on, so relying on agentsview alone puts them on the board at
     zero.
+  * the OpenClaw store directly, for the same reason: current OpenClaw keeps
+    transcripts in per-agent SQLite rather than the session files agentsview
+    reads, so an OpenClaw agent reports zero without it.
 
 Sends, per call: --register posts the page content you hand it (agent id,
 name, blurb, repo, runtime, video, images, install-url, logo), all of it public
@@ -36,7 +39,7 @@ Reports use the stored Index-issued key; the Plow token is used only once to
 exchange for an assertion during registration.
 """
 import datetime
-import fcntl, json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import fcntl, glob, json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 # Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
@@ -559,6 +562,95 @@ def state_dir():
     beside the key that reports for it."""
     told = os.environ.get("HERMES_HOME")
     return told if told else os.path.dirname(TOKEN_PATH)
+
+
+def _stamp_ms(timestamp, created_at):
+    """When the event happened, in epoch ms: its own ISO stamp, else its row's."""
+    if isinstance(timestamp, str):
+        try:
+            return datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            pass
+    return created_at
+
+
+def from_openclaw(days, state=None):
+    """OpenClaw's own store: one SQLite database per agent, one row per event.
+
+    Current OpenClaw keeps transcripts in `agents/<id>/agent/openclaw-agent.sqlite`,
+    not in the session files the JSONL collectors read -- so an agent built on
+    it reports nothing until something reads the database. Each assistant
+    message carries the usage of the call that produced it, so these counts are
+    per event and simply add up: no snapshot-and-diff like Hermes' cumulative
+    counters.
+
+    A store that cannot be read is a FAILURE, never an idle day: the server
+    replaces a (day, model) total with what we send.
+    """
+    # Told where to look, or guessing. The difference decides what an absent
+    # store MEANS: a configured root with nothing in it is a misconfiguration
+    # this client must say out loud, while a guessed one is simply a machine
+    # that does not run OpenClaw.
+    configured = bool(state or os.environ.get("OPENCLAW_STATE_DIR"))
+    root = state or os.environ.get("OPENCLAW_STATE_DIR") or os.path.expanduser("~/.openclaw")
+    stores = sorted(glob.glob(os.path.join(root, "agents", "*", "agent", "openclaw-agent.sqlite")))
+    if configured and not stores:
+        FAILURES.append(f"openclaw: no store under {root} (OPENCLAW_STATE_DIR names it)")
+        return {}
+    # `created_at` is epoch milliseconds, and the cutoff is the START of the
+    # oldest local day in the window, not the instant `days` ago: buckets are
+    # local calendar days, and cutting mid-day would post that day's tail as if
+    # it were the whole day -- which the server would then store in place of
+    # the complete total it already holds.
+    oldest = datetime.date.today() - datetime.timedelta(days=days)
+    since = int(datetime.datetime.combine(oldest, datetime.time.min).timestamp() * 1000)
+    out = defaultdict(lambda: defaultdict(lambda: dict.fromkeys(KEYS, 0)))
+    seen = set()
+    for store in stores:
+        try:
+            db = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+            try:
+                rows = db.execute(
+                    "SELECT event_json, created_at FROM transcript_events WHERE created_at >= ?",
+                    (since,)).fetchall()
+            finally:
+                db.close()
+        except sqlite3.Error as error:
+            FAILURES.append(f"openclaw {store}: {type(error).__name__}: {error}")
+            continue
+        for raw, created_at in rows:
+            try:
+                event = json.loads(raw) or {}
+            except (ValueError, TypeError):
+                continue
+            message = event.get("message") or {}
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            # One LLM call, counted once. A checkpoint fork or a store copied
+            # between roots repeats the same event, and `responseId` is what
+            # the canonical collector (reporter/openclaw.ts) keys on to tell
+            # those apart from two calls that merely look alike.
+            response = message.get("responseId")
+            if response is not None:
+                if response in seen:
+                    continue
+                seen.add(response)
+            # The event's own timestamp when it has one -- `created_at` is when
+            # the row was written -- and the LOCAL calendar date either way, the
+            # rule reporter/openclaw.ts already follows: a UTC date splits one
+            # user-perceived day in two near local midnight, and the same moment
+            # would land on a different dashboard day than this machine's
+            # claude and codex rows.
+            stamp = _stamp_ms(event.get("timestamp"), created_at)
+            date = datetime.datetime.fromtimestamp(stamp / 1000).date().isoformat()
+            row = out[date][message.get("model") or "unknown"]
+            for key, field in (("input", "input"), ("output", "output"),
+                               ("cache_read", "cacheRead"), ("cache_write", "cacheWrite")):
+                value = usage.get(field)
+                if isinstance(value, int):
+                    row[key] += value
+    return out
 
 
 def from_hermes(days, home=None, state_path=None):
@@ -1088,7 +1180,7 @@ def main(argv):
     # should be answered with the typo, not with a demand for a credential.)
     auth_headers()
     days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 28
-    payload = {"days": merge(from_agentsview(days), from_hermes(days))}
+    payload = {"days": merge(from_agentsview(days), from_hermes(days), from_openclaw(days))}
     total = sum(m[k] for d in payload["days"] for m in d["models"] for k in KEYS)
     for f in FAILURES:
         print(f"  COLLECTOR FAILED — {f}")
