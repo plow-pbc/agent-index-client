@@ -36,7 +36,7 @@ Reports use the stored Index-issued key; the Plow token is used only once to
 exchange for an assertion during registration.
 """
 import datetime
-import fcntl, json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import fcntl, glob, json, os, re, secrets, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 # Line-buffer stdout. Under a supervisor the output is a pipe, not a terminal,
@@ -559,6 +559,59 @@ def state_dir():
     beside the key that reports for it."""
     told = os.environ.get("HERMES_HOME")
     return told if told else os.path.dirname(TOKEN_PATH)
+
+
+def from_openclaw(days, state=None):
+    """OpenClaw's own store: one SQLite database per agent, one row per event.
+
+    Current OpenClaw keeps transcripts in `agents/<id>/agent/openclaw-agent.sqlite`,
+    not in the session files the JSONL collectors read -- so an agent built on
+    it reports nothing until something reads the database. Each assistant
+    message carries the usage of the call that produced it, so these counts are
+    per event and simply add up: no snapshot-and-diff like Hermes' cumulative
+    counters.
+
+    A store that cannot be read is a FAILURE, never an idle day: the server
+    replaces a (day, model) total with what we send.
+    """
+    root = state or os.environ.get("OPENCLAW_STATE_DIR") or os.path.expanduser("~/.openclaw")
+    stores = sorted(glob.glob(os.path.join(root, "agents", "*", "agent", "openclaw-agent.sqlite")))
+    # `created_at` is epoch milliseconds; the window is the same one the other
+    # collectors use, and trimming in SQL keeps a long-lived store cheap to read.
+    since = int((time.time() - days * 86400) * 1000)
+    out = defaultdict(lambda: defaultdict(lambda: dict.fromkeys(KEYS, 0)))
+    for store in stores:
+        try:
+            db = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+            try:
+                rows = db.execute(
+                    "SELECT event_json, created_at FROM transcript_events WHERE created_at >= ?",
+                    (since,)).fetchall()
+            finally:
+                db.close()
+        except sqlite3.Error as error:
+            FAILURES.append(f"openclaw {store}: {type(error).__name__}: {error}")
+            continue
+        for raw, created_at in rows:
+            try:
+                message = (json.loads(raw) or {}).get("message") or {}
+            except (ValueError, TypeError):
+                continue
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            # The event's own timestamp when it has one: `created_at` is when the
+            # row was written, which is the same turn but not always the same UTC day.
+            stamp = json.loads(raw).get("timestamp")
+            date = stamp[:10] if isinstance(stamp, str) and len(stamp) >= 10 else \
+                datetime.datetime.fromtimestamp(created_at / 1000, datetime.timezone.utc).date().isoformat()
+            row = out[date][message.get("model") or "unknown"]
+            for key, field in (("input", "input"), ("output", "output"),
+                               ("cache_read", "cacheRead"), ("cache_write", "cacheWrite")):
+                value = usage.get(field)
+                if isinstance(value, int):
+                    row[key] += value
+    return out
 
 
 def from_hermes(days, home=None, state_path=None):
@@ -1088,7 +1141,7 @@ def main(argv):
     # should be answered with the typo, not with a demand for a credential.)
     auth_headers()
     days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 28
-    payload = {"days": merge(from_agentsview(days), from_hermes(days))}
+    payload = {"days": merge(from_agentsview(days), from_hermes(days), from_openclaw(days))}
     total = sum(m[k] for d in payload["days"] for m in d["models"] for k in KEYS)
     for f in FAILURES:
         print(f"  COLLECTOR FAILED — {f}")
