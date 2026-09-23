@@ -189,7 +189,7 @@ across agents.
 
 ## Where it reads usage from
 
-Two sources, summed, because neither covers a real machine alone:
+Three sources, summed, because none covers a real machine alone:
 
 - **agentsview**, the same index the Builder Index client reads. Rich and
   correct for `claude` and `codex`.
@@ -197,6 +197,12 @@ Two sources, summed, because neither covers a real machine alone:
   `~/.hermes/state.db`). agentsview indexes Hermes sessions but reports **zero
   tokens** for every one, so without this a Hermes agent lands on the index at
   zero.
+- **the OpenClaw store directly**, at
+  `$OPENCLAW_STATE_DIR/agents/<id>/agent/openclaw-agent.sqlite` (default
+  `~/.openclaw`). Current OpenClaw keeps transcripts in SQLite rather than the
+  session files agentsview reads, so without this an OpenClaw agent lands on
+  the index at zero. Setting `OPENCLAW_STATE_DIR` to a directory holding no
+  store is a misconfiguration and stops the run.
 
 **Set `HERMES_HOME` explicitly in a container**, and set it correctly: a path
 you name that holds no `state.db` is a **collector failure**. The run stops

@@ -12,13 +12,16 @@
     agent_index_client.py status                    # 0 registered, 3 not, 2 cannot tell
     agent_index_client.py --self-check
 
-Collects from two places, because neither alone covers a real machine:
+Collects from three places, because none alone covers a real machine:
   * agentsview, the same index the Builder Index client reads. Rich and correct
     for claude and codex. Measured on v0.38.1: grok reports zero, fixed
     upstream in 0.39.0; hermes reports zero with no fix known.
   * the Hermes store directly, because of that hermes gap — Hermes is what our
     own agents run on, so relying on agentsview alone puts them on the board at
     zero.
+  * the OpenClaw store directly, for the same reason: current OpenClaw keeps
+    transcripts in per-agent SQLite rather than the session files agentsview
+    reads, so an OpenClaw agent reports zero without it.
 
 Sends, per call: --register posts the page content you hand it (agent id,
 name, blurb, repo, runtime, video, images, install-url, logo), all of it public
@@ -561,6 +564,16 @@ def state_dir():
     return told if told else os.path.dirname(TOKEN_PATH)
 
 
+def _stamp_ms(timestamp, created_at):
+    """When the event happened, in epoch ms: its own ISO stamp, else its row's."""
+    if isinstance(timestamp, str):
+        try:
+            return datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            pass
+    return created_at
+
+
 def from_openclaw(days, state=None):
     """OpenClaw's own store: one SQLite database per agent, one row per event.
 
@@ -574,8 +587,16 @@ def from_openclaw(days, state=None):
     A store that cannot be read is a FAILURE, never an idle day: the server
     replaces a (day, model) total with what we send.
     """
+    # Told where to look, or guessing. The difference decides what an absent
+    # store MEANS: a configured root with nothing in it is a misconfiguration
+    # this client must say out loud, while a guessed one is simply a machine
+    # that does not run OpenClaw.
+    configured = bool(state or os.environ.get("OPENCLAW_STATE_DIR"))
     root = state or os.environ.get("OPENCLAW_STATE_DIR") or os.path.expanduser("~/.openclaw")
     stores = sorted(glob.glob(os.path.join(root, "agents", "*", "agent", "openclaw-agent.sqlite")))
+    if configured and not stores:
+        FAILURES.append(f"openclaw: no store under {root} (OPENCLAW_STATE_DIR names it)")
+        return {}
     # `created_at` is epoch milliseconds; the window is the same one the other
     # collectors use, and trimming in SQL keeps a long-lived store cheap to read.
     since = int((time.time() - days * 86400) * 1000)
@@ -600,11 +621,14 @@ def from_openclaw(days, state=None):
             usage = message.get("usage")
             if not isinstance(usage, dict):
                 continue
-            # The event's own timestamp when it has one: `created_at` is when the
-            # row was written, which is the same turn but not always the same UTC day.
-            stamp = json.loads(raw).get("timestamp")
-            date = stamp[:10] if isinstance(stamp, str) and len(stamp) >= 10 else \
-                datetime.datetime.fromtimestamp(created_at / 1000, datetime.timezone.utc).date().isoformat()
+            # The event's own timestamp when it has one -- `created_at` is when
+            # the row was written -- and the LOCAL calendar date either way, the
+            # rule reporter/openclaw.ts already follows: a UTC date splits one
+            # user-perceived day in two near local midnight, and the same moment
+            # would land on a different dashboard day than this machine's
+            # claude and codex rows.
+            stamp = _stamp_ms(json.loads(raw).get("timestamp"), created_at)
+            date = datetime.datetime.fromtimestamp(stamp / 1000).date().isoformat()
             row = out[date][message.get("model") or "unknown"]
             for key, field in (("input", "input"), ("output", "output"),
                                ("cache_read", "cacheRead"), ("cache_write", "cacheWrite")):
