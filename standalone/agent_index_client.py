@@ -574,6 +574,83 @@ def _stamp_ms(timestamp, created_at):
     return created_at
 
 
+# What ZSTD_getFrameContentSize returns instead of a length: the frame does not
+# record one, or it is not a frame at all.
+_ZSTD_NO_SIZE = (0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFE)
+
+# Resolved on the first compressed row and kept: the answer cannot change inside
+# a run, and a store whose every substantive event is compressed would otherwise
+# pay the search per row. The flag is separate from the decoder because None is
+# an answer -- asked, and this machine has nothing.
+_ZSTD = None
+_ZSTD_RESOLVED = False
+
+
+def _zstd_decoder():
+    """Use Python's standard-library decoder, or the image's existing libzstd."""
+    try:                                    # 3.14+, the standard library
+        from compression import zstd
+        return lambda blob, hint: zstd.decompress(blob)
+    except Exception:
+        pass
+    try:                                    # the library itself: no package
+        import ctypes, ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("zstd") or "libzstd.so.1")
+        lib.ZSTD_decompress.restype = ctypes.c_size_t
+        lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                        ctypes.c_char_p, ctypes.c_size_t]
+        lib.ZSTD_isError.restype = ctypes.c_uint
+        lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+        lib.ZSTD_getErrorName.restype = ctypes.c_char_p
+        lib.ZSTD_getErrorName.argtypes = [ctypes.c_size_t]
+        lib.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+        lib.ZSTD_getFrameContentSize.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+
+        def inflate(blob, hint):
+            # Schema 23 supplies the original size when the frame omits it.
+            size = lib.ZSTD_getFrameContentSize(blob, len(blob))
+            if size in _ZSTD_NO_SIZE or size == 0:
+                size = int(hint)
+            buf = ctypes.create_string_buffer(int(size))
+            read = lib.ZSTD_decompress(buf, int(size), blob, len(blob))
+            if lib.ZSTD_isError(read):
+                raise RuntimeError("libzstd: " + lib.ZSTD_getErrorName(read).decode())
+            return buf.raw[:read].decode("utf-8")
+
+        # Linking is not running: a CDLL of the wrong ABI, or a stub, resolves
+        # the symbols and then fails on the first real event -- which would be
+        # discovered mid-report rather than here. This frame is `{}`.
+        assert inflate(b"\x28\xb5\x2f\xfd\x20\x02\x11\x00\x00\x7b\x7d", 2) == "{}"
+        return inflate
+    except Exception:
+        pass
+    return None
+
+
+def _event_json(raw, blob, utf8_bytes):
+    """One transcript event's JSON, from whichever column holds it.
+
+    From OpenClaw transcript schema 23, an event of 1024 UTF-8 bytes or more is
+    written to `event_zstd` with `event_json` set to NULL -- the table's own
+    CHECK makes the two mutually exclusive, so a reader that names one column
+    is reading half the table by construction, not a nullable convenience.
+    The assistant message carrying `usage` is exactly the row that crosses that
+    threshold on a substantive turn, which is why reading `event_json` alone
+    keeps the trivial turns and drops the real ones.
+
+    RAISES when a compressed event cannot be inflated, because the caller has
+    to be able to tell "no usage in this row" from "we could not read it"."""
+    if raw is not None or blob is None:
+        return raw
+    global _ZSTD, _ZSTD_RESOLVED
+    if not _ZSTD_RESOLVED:
+        _ZSTD, _ZSTD_RESOLVED = _zstd_decoder(), True
+    if _ZSTD is None:
+        raise RuntimeError("no zstd decoder on this machine (wanted compression.zstd, "
+                           "or libzstd)")
+    return _ZSTD(blob, utf8_bytes)
+
+
 def from_openclaw(days, state=None):
     """OpenClaw's own store: one SQLite database per agent, one row per event.
 
@@ -610,15 +687,36 @@ def from_openclaw(days, state=None):
         try:
             db = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
             try:
+                # Asked per store rather than assumed, because a store written
+                # before transcript schema 23 has no `event_zstd` at all, and
+                # naming a column that is not there is an OperationalError --
+                # reported below as a FAILURE, which would block the whole
+                # report over a store this can in fact read completely.
+                columns = {row[1] for row in db.execute("PRAGMA table_info(transcript_events)")}
                 rows = db.execute(
-                    "SELECT event_json, created_at FROM transcript_events WHERE created_at >= ?",
+                    "SELECT event_json, event_zstd, event_utf8_bytes, created_at "
+                    "FROM transcript_events WHERE created_at >= ?"
+                    if {"event_zstd", "event_utf8_bytes"} <= columns else
+                    "SELECT event_json, NULL, NULL, created_at "
+                    "FROM transcript_events WHERE created_at >= ?",
                     (since,)).fetchall()
             finally:
                 db.close()
         except sqlite3.Error as error:
             FAILURES.append(f"openclaw {store}: {type(error).__name__}: {error}")
             continue
-        for raw, created_at in rows:
+        for raw, blob, utf8_bytes, created_at in rows:
+            try:
+                raw = _event_json(raw, blob, utf8_bytes)
+            except Exception as error:
+                # A FAILURE, not a `continue`, for the same reason an unreadable
+                # store is one. Before this the compressed rows reached
+                # json.loads(None), raised TypeError, and were swallowed by the
+                # except below as "nothing here" -- so a busy agent posted a
+                # trivial agent's numbers, with no error to notice.
+                FAILURES.append(f"openclaw {store}: a compressed transcript event would "
+                                f"not decompress ({type(error).__name__}: {error})")
+                break
             try:
                 event = json.loads(raw) or {}
             except (ValueError, TypeError):

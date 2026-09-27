@@ -4,14 +4,18 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { zstdCompressSync } from "node:zlib";
+import Database from "better-sqlite3";
 
 // The standalone client is the copy that ships inside a container, so this
 // drives the real script rather than a re-implementation of it.
 const CLIENT = path.join(__dirname, "..", "..", "standalone", "agent_index_client.py");
 
-/** One OpenClaw state root holding one agent's store, the shape current
- *  OpenClaw writes: `agents/<id>/agent/openclaw-agent.sqlite`, one row per
- *  transcript event, usage carried by the assistant message that spent it. */
+/** One OpenClaw state root holding one agent's store, in the shape OpenClaw
+ *  wrote before transcript schema 23: `agents/<id>/agent/openclaw-agent.sqlite`,
+ *  one row per transcript event, usage carried by the assistant message that
+ *  spent it, and no compression columns at all. Kept as that older shape on
+ *  purpose -- a client that names `event_zstd` unconditionally cannot read it. */
 function store(events: object[], agentId = "main"): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "aic-openclaw-"));
   const dir = path.join(root, "agents", agentId, "agent");
@@ -46,6 +50,54 @@ print(json.dumps(namespace["FAILURES"]))
 let call = 0;
 const usage = (model: string, u: object, timestamp = "2026-09-23T11:52:38.505Z", responseId = `gen-${++call}`) =>
   ({ type: "message", timestamp, message: { role: "assistant", model, responseId, usage: u } });
+
+// What OpenClaw compresses at: any event whose JSON reaches this many UTF-8
+// bytes goes to `event_zstd` with `event_json` NULL.
+const MIN_COMPRESS_BYTES = 1024;
+
+/** The same root, in the shape OpenClaw writes from transcript schema 23 on,
+ *  compressing by the rule the store itself uses rather than by hand. The real
+ *  table's CHECK makes `event_json` and `event_zstd` mutually exclusive, so each
+ *  row here carries exactly one of them, as a real store does. */
+function schema23Store(events: object[], agentId = "main"): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aic-openclaw-zstd-"));
+  const dir = path.join(root, "agents", agentId, "agent");
+  fs.mkdirSync(dir, { recursive: true });
+  const db = new Database(path.join(dir, "openclaw-agent.sqlite"));
+  db.exec(`
+    CREATE TABLE transcript_events (
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      event_json TEXT,
+      created_at INTEGER NOT NULL,
+      event_zstd BLOB,
+      event_utf8_bytes INTEGER,
+      navigation_json TEXT,
+      PRIMARY KEY (session_id, seq),
+      CHECK (
+        (event_json IS NOT NULL AND event_zstd IS NULL)
+        OR (event_json IS NULL AND event_zstd IS NOT NULL AND event_utf8_bytes IS NOT NULL)
+      )
+    )
+  `);
+  const insert = db.prepare(
+    "INSERT INTO transcript_events (session_id, seq, event_json, created_at, event_zstd, event_utf8_bytes)"
+    + " VALUES ('s', ?, ?, ?, ?, ?)");
+  events.forEach((event, seq) => {
+    const json = JSON.stringify(event);
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes >= MIN_COMPRESS_BYTES) insert.run(seq, null, Date.now(), zstdCompressSync(Buffer.from(json, "utf8")), bytes);
+    else insert.run(seq, json, Date.now(), null, null);
+  });
+  db.close();
+  return root;
+}
+
+/** An assistant message big enough to be compressed, carrying real usage: the
+ *  row a substantive turn actually writes. `filler` is inert text on the event,
+ *  not on the usage, so the numbers under test stay small and legible. */
+const bigUsage = (model: string, u: object, responseId: string) =>
+  ({ ...usage(model, u, undefined, responseId), filler: "x".repeat(MIN_COMPRESS_BYTES * 2) });
 
 test("usage lands under its day and model, events add up, and a turn without usage adds no row", () => {
   const days = collected(store([
@@ -103,4 +155,42 @@ print(json.dumps(namespace["FAILURES"]))
   const [days, failures] = out.trim().split("\n");
   assert.deepEqual(JSON.parse(days), {});
   assert.deepEqual(JSON.parse(failures), []);
+});
+
+test("a compressed event is read, so a substantive turn is not dropped", () => {
+  // The bug this covers: `SELECT event_json` alone leaves `raw` NULL for a
+  // compressed row, json.loads raises TypeError, and the skip is indistinguishable
+  // from a row with no usage. The small turn survived it and the big one did not,
+  // so the client reported a real number that was 2.5% of the truth.
+  const days = collected(schema23Store([
+    usage("z-ai/glm-5.2", { input: 111, output: 222, cacheRead: 0, cacheWrite: 0 }, undefined, "gen-small"),
+    bigUsage("z-ai/glm-5.2", { input: 4321, output: 8765, cacheRead: 0, cacheWrite: 0 }, "gen-big"),
+  ]));
+  assert.deepEqual(days, {
+    "2026-09-23": {
+      "z-ai/glm-5.2": { input: 4432, output: 8987, cache_read: 0, cache_write: 0 },
+    },
+  });
+});
+
+test("a compressed event that will not decompress is a failure, not a smaller total", () => {
+  // Reporting the readable rows here would replace the server's correct total
+  // for that day and model with a smaller one, which is the failure mode the
+  // whole collector is written against.
+  const root = schema23Store([
+    usage("z-ai/glm-5.2", { input: 111, output: 222, cacheRead: 0, cacheWrite: 0 }, undefined, "gen-small"),
+    bigUsage("z-ai/glm-5.2", { input: 4321, output: 8765, cacheRead: 0, cacheWrite: 0 }, "gen-big"),
+  ]);
+  const db = new Database(path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite"));
+  db.prepare("UPDATE transcript_events SET event_zstd = ? WHERE event_zstd IS NOT NULL")
+    .run(Buffer.from("not a zstd frame"));
+  db.close();
+  const out = execFileSync("python3", ["-c", `
+import json, sys
+namespace = {"__name__": "collector"}
+exec(compile(open(sys.argv[1]).read().split("def main(")[0], sys.argv[1], "exec"), namespace)
+namespace["from_openclaw"](28, state=sys.argv[2])
+print(json.dumps(namespace["FAILURES"]))
+`, CLIENT, root], { encoding: "utf8" });
+  assert.match(JSON.parse(out.trim())[0], /compressed transcript event would not decompress/);
 });

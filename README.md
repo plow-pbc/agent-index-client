@@ -3,8 +3,8 @@
 Publishes what an agent is doing to the [Agent Index](https://aiworthusing.com/agent-index):
 its day-by-model token usage, and the stories of what it actually accomplished.
 
-Python standard library only — no node, no build step, no dependencies — because
-this runs where the agent runs, which is usually a container or a small VPS.
+A standalone Python client with no build step, running where the agent runs,
+usually a container or a small VPS.
 
 ## What it sends
 
@@ -34,7 +34,10 @@ curl -O https://raw.githubusercontent.com/plow-pbc/agent-index-client/main/stand
 chmod +x agent_index_client.py
 ```
 
-`python3` is the only requirement — no dependencies to install.
+`python3` is required. OpenClaw 2026.9.6+ compresses transcript events, so its
+collector also needs Python 3.14+ (`compression.zstd`) or the libzstd shared
+library. The current Plow OpenClaw image already includes libzstd; no additional
+installation is needed there.
 
 ## The credential
 
