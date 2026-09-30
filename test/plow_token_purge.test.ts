@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY, type StandIns } from "./fake-plow-index";
+import { createEmptyHermesStore } from "./hermes-store";
 
 // The standalone client is the copy that ships inside a container, so these
 // drive the real script rather than a re-implementation of it.
@@ -486,15 +486,6 @@ function volumeHome(s: { plow: string; index: string }, volume?: string) {
 
 /** The one file: which install this is, and the key that reports for it. */
 const stateFile = (dir: string) => path.join(dir, ".agent-index.json");
-/** A Hermes store with nothing in it: enough for the collector to read, which
- *  is all these cases need. One schema, because two drift. */
-function createEmptyHermesStore(dir: string) {
-  fs.mkdirSync(dir, { recursive: true });
-  const db = new Database(path.join(dir, "state.db"));
-  db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
-          " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
-  db.close();
-}
 const stateOf = (dir: string) =>
   JSON.parse(fs.readFileSync(stateFile(dir), "utf8")) as { install_id?: string; key?: string };
 const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>

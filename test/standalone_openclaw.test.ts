@@ -6,6 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import Database from "better-sqlite3";
+import { createEmptyHermesStore } from "./hermes-store";
 
 // The standalone client is the copy that ships inside a container, so this
 // drives the real script rather than a re-implementation of it.
@@ -270,15 +271,7 @@ function hostRun(withHermes: boolean) {
   fs.mkdirSync(path.join(home, ".agent-index"));
   fs.writeFileSync(path.join(home, ".agent-index", ".agent-index.json"),
     JSON.stringify({ install_id: "install-test", key: "aik_" + "k".repeat(43) }), { mode: 0o600 });
-  if (withHermes) {
-    fs.mkdirSync(path.join(home, ".hermes"));
-    execFileSync("python3", ["-c", `
-import sqlite3, sys
-c = sqlite3.connect(sys.argv[1])
-c.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT, output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)")
-c.commit()
-`, path.join(home, ".hermes", "state.db")]);
-  }
+  if (withHermes) createEmptyHermesStore(path.join(home, ".hermes"));
   try {
     const out = execFileSync("python3", [CLIENT, "--agent", "x", "--dry-run"], {
       encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
