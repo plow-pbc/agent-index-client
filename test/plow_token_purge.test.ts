@@ -232,60 +232,15 @@ function stubAgentsView(home: string, body: string) {
   fs.symlinkSync(bin, path.join(home, ".local", "bin"));   // where the client looks
 }
 
-/** A home with a stand-in agentsview that records the environment it was given.
- *  Both env tests need the same thing: an installed collector, a place for it
- *  to write what it saw, and a client run that invokes it. */
-function withFakeAgentsView() {
-  const home = homeWith(KEY);   // a report needs a stored key BEFORE it collects
+test("the client never runs agentsview, so nothing on the machine and no credential goes near it", () => {
+  // It used to: agentsview counts every coding tool on the device, and its
+  // totals were reported as this agent's usage (card f2bc8633c1). With the
+  // scan gone, the credential-withholding env it needed is gone too.
+  const home = homeWith(KEY);
   const seen = path.join(home, "seen.txt");
   stubAgentsView(home, `env > ${seen}\necho '[]'`);
-  return {
-    home,
-    /** Run a collection and return the environment the child actually received. */
-    childEnv(env: Record<string, string | undefined>) {
-      client(["--agent", "x", "--dry-run"], home, env);
-      assert.ok(fs.existsSync(seen), "the stand-in agentsview should have run");
-      return fs.readFileSync(seen, "utf8");
-    },
-  };
-}
-
-test("the Plow token is never handed to the agentsview binary", () => {
-  // agentsview is separately installed: we do not ship it, cannot audit it, and
-  // it has no use for the credential that identifies this agent's owner. The
-  // inherited environment handed it over on every run.
-  const av = withFakeAgentsView();
-  const childEnv = av.childEnv({
-    PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel",   // pragma: allowlist secret
-    SOME_OTHER_SECRET: "also-not-for-a-child",             // pragma: allowlist secret
-  });
-  assert.doesNotMatch(childEnv, /plow-token-that-must-not-travel/,  // pragma: allowlist secret
-    "the child must never see the Plow token");
-  assert.doesNotMatch(childEnv, /also-not-for-a-child/,             // pragma: allowlist secret
-    "an allowlist, so a secret we have not thought of yet is also withheld");
-  assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
-});
-
-test("agentsview keeps its own configuration", () => {
-  // Withholding a secret must not withhold the tool's own settings: an install
-  // that points agentsview at its data through one of these and does not get it
-  // back reads the DEFAULT location and reports a total that is WRONG rather
-  // than absent. The list comes from `agentsview --help` (v0.38.1).
-  const CONFIG = {
-    AGENTSVIEW_DATA_DIR: "/tmp/av-data",
-    CLAUDE_PROJECTS_DIR: "/tmp/claude-projects",
-    CODEX_SESSIONS_DIR: "/tmp/codex-sessions",
-    CURSOR_PROJECTS_DIR: "/tmp/cursor-projects",
-    OPENCODE_DIR: "/tmp/opencode",
-    ZED_DIR: "/tmp/zed",
-  };
-  const av = withFakeAgentsView();
-  const childEnv = av.childEnv({ ...CONFIG, PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel" }); // pragma: allowlist secret
-  for (const [k, v] of Object.entries(CONFIG)) {
-    assert.match(childEnv, new RegExp(`^${k}=${v}$`, "m"), `${k} must reach agentsview`);
-  }
-  assert.doesNotMatch(childEnv, /plow-token-that-must-not-travel/,  // pragma: allowlist secret
-    "and the token still must not");
+  client(["--agent", "x", "--dry-run"], home, { PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel" }); // pragma: allowlist secret
+  assert.ok(!fs.existsSync(seen), "agentsview must not have been run at all");
 });
 
 test("a failed tag read fails the command", () => {
