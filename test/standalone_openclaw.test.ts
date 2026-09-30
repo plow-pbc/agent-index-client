@@ -33,18 +33,9 @@ db.commit()
 
 /** What the collector makes of that root, read back through the client itself. */
 function collected(root: string, env: Record<string, string> = {}): Record<string, Record<string, Record<string, number>>> {
-  const out = execFileSync("python3", ["-c", `
-import json, sys
-source = open(sys.argv[1]).read().split("def main(")[0]
-namespace = {"__name__": "collector"}
-exec(compile(source, sys.argv[1], "exec"), namespace)
-days = namespace["from_openclaw"](28, state=sys.argv[2])
-print(json.dumps({d: {m: dict(v) for m, v in ms.items()} for d, ms in days.items()}))
-print(json.dumps(namespace["FAILURES"]))
-`, CLIENT, root], { encoding: "utf8", env: { ...process.env, ...env } });
-  const [days, failures] = out.trim().split("\n");
-  assert.deepEqual(JSON.parse(failures), [], "a readable store must not report a failure");
-  return JSON.parse(days);
+  const { days, failures } = collectedWithFailures(root, env);
+  assert.deepEqual(failures, [], "a readable store must not report a failure");
+  return days;
 }
 
 let call = 0;
@@ -254,4 +245,21 @@ echo '[{"date":"2026-09-23","modelBreakdowns":[{"modelName":"claude-opus-5","inp
   });
   assert.match(out, /z-ai\/glm-5\.2/, "the agent's own usage is reported");
   assert.doesNotMatch(out, /claude-opus-5/, "the machine's other usage is not");
+});
+
+test("the host's default ~/.openclaw is not claimed without an id, and is not a failure", () => {
+  // Nothing ties a guessed root's only store to --agent: on a laptop it is
+  // whatever OpenClaw the host runs.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-host-"));
+  fs.cpSync(store([usage("m", { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 })]), path.join(home, ".openclaw"), { recursive: true });
+  const run = (id: string) => JSON.parse(execFileSync("python3", ["-c", `
+import json, sys
+source = open(sys.argv[1]).read().split("def main(")[0]
+namespace = {"__name__": "collector"}
+exec(compile(source, sys.argv[1], "exec"), namespace)
+days = namespace["from_openclaw"](28)
+print(json.dumps([sorted(days), namespace["FAILURES"]]))
+`, CLIENT], { encoding: "utf8", env: { ...process.env, HOME: home, OPENCLAW_STATE_DIR: "", OPENCLAW_AGENT_ID: id } }).trim().split("\n").pop()!);
+  assert.deepEqual(run(""), [[], []], "unclaimed: nothing reported, nothing failed");
+  assert.deepEqual(run("main"), [["2026-09-23"], []], "named by id: that store is reported");
 });

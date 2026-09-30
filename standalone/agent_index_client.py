@@ -614,6 +614,14 @@ def from_openclaw(days, state=None):
     # OPENCLAW_AGENT_ID, or the only store there is -- a Plow container holds
     # exactly one. Several and no name is a failure, not a guess.
     wanted = os.environ.get("OPENCLAW_AGENT_ID")
+    if not wanted and not configured and stores:
+        # A guessed ~/.openclaw is the host's OpenClaw, not necessarily this
+        # agent's: nothing ties its store to --agent. Not claimed without an id,
+        # and not a failure either -- a Hermes agent's reporter on a laptop
+        # that also runs OpenClaw must still report.
+        print(f"  OpenClaw found under {root} but not claimed: set OPENCLAW_AGENT_ID "
+              "(or OPENCLAW_STATE_DIR) if it is this agent's")
+        return {}
     if wanted:
         stores = [s for s in stores if os.path.basename(os.path.dirname(os.path.dirname(s))) == wanted]
         if not stores:

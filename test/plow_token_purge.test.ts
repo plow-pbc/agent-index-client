@@ -217,32 +217,6 @@ test("the image ships the client this repo builds", () => {
     `${home} holds the install id, so the image has to declare it as a volume`);
 });
 
-/** Install a stand-in agentsview in a home, running `body`.
- *
- *  Always, even where a test does not care what the collector says: the client
- *  falls back to /opt/homebrew/bin and /usr/local/bin, which are ABSOLUTE, so
- *  a machine with the real agentsview installed would run it and collect that
- *  developer's own usage into the test.
- */
-function stubAgentsView(home: string, body: string) {
-  const bin = path.join(home, "bin");
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, "agentsview"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  fs.mkdirSync(path.join(home, ".local"), { recursive: true });
-  fs.symlinkSync(bin, path.join(home, ".local", "bin"));   // where the client looks
-}
-
-test("the client never runs agentsview, so nothing on the machine and no credential goes near it", () => {
-  // It used to: agentsview counts every coding tool on the device, and its
-  // totals were reported as this agent's usage (card f2bc8633c1). With the
-  // scan gone, the credential-withholding env it needed is gone too.
-  const home = homeWith(KEY);
-  const seen = path.join(home, "seen.txt");
-  stubAgentsView(home, `env > ${seen}\necho '[]'`);
-  client(["--agent", "x", "--dry-run"], home, { PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel" }); // pragma: allowlist secret
-  assert.ok(!fs.existsSync(seen), "agentsview must not have been run at all");
-});
-
 test("a failed tag read fails the command", () => {
   // Returning [] said "no tags are in use", which is a real answer to a
   // different question, and --tags exited 0 having read nothing.
@@ -323,7 +297,6 @@ async function withStandIns<T>(body: (s: StandIns) => Promise<T>, mintDelayMs = 
 /** A home wired to the stand-ins, with a collector that finds nothing. */
 function bootstrapHome(s: { plow: string; index: string }) {
   const home = homeWith();               // a fresh install: nothing stored
-  stubAgentsView(home, "echo '[]'");
   return {
     home,
     env: {
@@ -459,8 +432,7 @@ test("a report prefers the stored key even while a Plow token is exported", asyn
   const s = await standIns();
   try {
     const home = homeWith(MINTED_KEY);       // already bootstrapped
-    stubAgentsView(home, "echo '[]'");
-    const r = await clientAsync(["--agent", "purge-test"], home, {
+      const r = await clientAsync(["--agent", "purge-test"], home, {
       PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow,
       AGENT_INDEX_API: s.index, HERMES_HOME: undefined,
     });
@@ -502,7 +474,6 @@ test("--delete-story removes that one story with the stored key", async () => {
  *  image sets HERMES_HOME=/opt/data and mounts it, which is what this is. */
 function volumeHome(s: { plow: string; index: string }, volume?: string) {
   const home = homeWith();
-  stubAgentsView(home, "echo '[]'");
   const data = volume || fs.mkdtempSync(path.join(os.tmpdir(), "aic-volume-"));
   return {
     home, data,
@@ -659,8 +630,7 @@ test("the install id does not move when a Hermes store appears later", () =>
     // the install arrives at its next registration with no id, mints a second
     // one, and strands everything the first wrote.
     const home = homeWith();
-    stubAgentsView(home, "echo '[]'");
-    const env = { PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+      const env = { PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
                   HERMES_HOME: undefined } as Record<string, string | undefined>;
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
     const mine = String(askedInstall(s));
