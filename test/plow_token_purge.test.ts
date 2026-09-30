@@ -449,6 +449,35 @@ for (const [flag, field] of [["--install-url", "install_url"], ["--logo", "logo"
   });
 }
 
+// The page's "What it does" and "Plow tools" go on the wire as [name, text]
+// pairs, exactly four capabilities; one empty value sends a clear; and a wrong
+// count or a missing colon is refused before anything is sent.
+test("--does / --tool / --latch send the section, clear it, and refuse a bad one", async () => {
+  const four = ["A: one", "B: two", "C: three", "D: four"].flatMap((v) => ["--does", v]);
+  for (const [label, args, want] of [
+    ["four lines, a tool and latch are sent", [...four, "--tool", "Plow Chat: Text it.", "--latch", "required"],
+      { capabilities: [["A", "one"], ["B", "two"], ["C", "three"], ["D", "four"]], tools: [["Plow Chat", "Text it."]], latch: "required" }],
+    ["an empty one clears", ["--does", "", "--tool", "", "--latch", ""], { capabilities: [], tools: [], latch: "" }],
+    ["omitted flags say nothing", [], { capabilities: undefined, tools: undefined, latch: undefined }],
+  ] as const) {
+    await withStandIns(async (s) => {
+      const { home, env } = bootstrapHome(s);
+      const r = await clientAsync(["--register", "--agent", "purge-test", ...args], home, env);
+      assert.equal(r.code, 0, r.out);
+      const body = s.indexHits.find((h) => h.path === "/v1/agents")?.body as Record<string, unknown>;
+      for (const [k, v] of Object.entries(want)) assert.deepEqual(body[k], v, `${label}: ${k}`);
+    });
+  }
+  for (const bad of [four.slice(0, 6), ["--tool", "Plow Chat"], ["--latch", "yes"]]) {
+    await withStandIns(async (s) => {
+      const { home, env } = bootstrapHome(s);
+      const r = await clientAsync(["--register", "--agent", "purge-test", ...bad], home, env);
+      assert.notEqual(r.code, 0, `${bad.join(" ")}: refused`);
+      assert.ok(!s.indexHits.some((h) => h.path === "/v1/agents"), `${bad.join(" ")}: nothing sent`);
+    });
+  }
+});
+
 // A --logo that is not a link is a file here, uploaded the way
 // `plow-agents profile --photo` uploads one: the bytes, after the listing is
 // written, under the same assertion -- and a file that cannot be read stops

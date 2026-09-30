@@ -24,7 +24,8 @@ Collects from three places, because none alone covers a real machine:
     reads, so an OpenClaw agent reports zero without it.
 
 Sends, per call: --register posts the page content you hand it (agent id,
-name, blurb, repo, runtime, video, images, install-url, logo), all of it public
+name, blurb, repo, runtime, video, images, install-url, logo, what it does,
+Plow tools, latch), all of it public
 because it IS the agent's page, plus one id for this install -- random, made
 up here once and kept, so the Index can tell two installs of one agent apart
 instead of adding them together (on an id somebody else published the page is
@@ -1061,6 +1062,24 @@ def register(agent, argv):
     images = [argv[i + 1] for i, a in enumerate(argv) if a == "--image"]
     if images:
         body["images"] = images
+    # The page's "What it does" (--does 'Title: detail', exactly four times)
+    # and "Plow tools" (--tool 'Plow Chat: how you use it'). One empty value
+    # clears the list back to the copy the site ships for this agent.
+    for flag, field in (("--does", "capabilities"), ("--tool", "tools")):
+        vals = [argv[i + 1] for i, a in enumerate(argv) if a == flag]
+        if vals == [""]:
+            body[field] = []
+        elif vals:
+            pairs = [[x.strip() for x in v.split(":", 1)] for v in vals]
+            if any(len(p) != 2 or not all(p) for p in pairs):
+                sys.exit(f"  {flag} takes 'Name: text', with the colon")
+            if flag == "--does" and len(pairs) != 4:
+                sys.exit(f"  --does takes exactly four lines, given {len(pairs)}")
+            body[field] = pairs
+    if opt("--latch") is not None:
+        if opt("--latch") not in ("required", "optional", "none", ""):
+            sys.exit("  --latch is required, optional or none ('' returns it to the site's reading)")
+        body["latch"] = opt("--latch")
 
     assertion = index_assertion()
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
@@ -1173,7 +1192,8 @@ def delete_story(agent, story_id):
 # exists to prevent.
 VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
                "--image", "--name", "--blurb", "--repo", "--runtime",
-               "--video", "--install-url", "--logo", "--delete-story"}
+               "--video", "--install-url", "--logo", "--delete-story",
+               "--does", "--tool", "--latch"}
 BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
 KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 
