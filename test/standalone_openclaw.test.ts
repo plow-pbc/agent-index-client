@@ -186,18 +186,20 @@ print(json.dumps(namespace["FAILURES"]))
   assert.match(JSON.parse(out.trim())[0], /compressed transcript event would not decompress/);
 });
 
-/** from_openclaw over a root, returning what it collected AND what it called a failure. */
-function collectedWithFailures(root: string, env: Record<string, string> = {}) {
+/** from_openclaw over a root (or, omitted, wherever it finds one), returning
+ *  what it collected AND what it called a failure. */
+function collectedWithFailures(root?: string, env: Record<string, string> = {}) {
   const out = execFileSync("python3", ["-c", `
 import json, sys
 source = open(sys.argv[1]).read().split("def main(")[0]
 namespace = {"__name__": "collector"}
 exec(compile(source, sys.argv[1], "exec"), namespace)
-days = namespace["from_openclaw"](28, state=sys.argv[2])
+days = namespace["from_openclaw"](28, state=sys.argv[2] or None)
 print(json.dumps({d: {m: dict(v) for m, v in ms.items()} for d, ms in days.items()}))
 print(json.dumps(namespace["FAILURES"]))
-`, CLIENT, root], { encoding: "utf8", env: { ...process.env, OPENCLAW_AGENT_ID: "", ...env } });
-  const [days, failures] = out.trim().split("\n");
+`, CLIENT, root ?? ""], { encoding: "utf8", env: { ...process.env, OPENCLAW_AGENT_ID: "", ...env } });
+  // The last two lines: a collector may print a note before them.
+  const [days, failures] = out.trim().split("\n").slice(-2);
   return { days: JSON.parse(days), failures: JSON.parse(failures) as string[] };
 }
 
@@ -252,14 +254,10 @@ test("the host's default ~/.openclaw is not claimed without an id, and is not a 
   // whatever OpenClaw the host runs.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-host-"));
   fs.cpSync(store([usage("m", { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 })]), path.join(home, ".openclaw"), { recursive: true });
-  const run = (id: string) => JSON.parse(execFileSync("python3", ["-c", `
-import json, sys
-source = open(sys.argv[1]).read().split("def main(")[0]
-namespace = {"__name__": "collector"}
-exec(compile(source, sys.argv[1], "exec"), namespace)
-days = namespace["from_openclaw"](28)
-print(json.dumps([sorted(days), namespace["FAILURES"]]))
-`, CLIENT], { encoding: "utf8", env: { ...process.env, HOME: home, OPENCLAW_STATE_DIR: "", OPENCLAW_AGENT_ID: id } }).trim().split("\n").pop()!);
-  assert.deepEqual(run(""), [[], []], "unclaimed: nothing reported, nothing failed");
-  assert.deepEqual(run("main"), [["2026-09-23"], []], "named by id: that store is reported");
+  const run = (id: string) => collectedWithFailures(undefined,
+    { HOME: home, OPENCLAW_STATE_DIR: "", OPENCLAW_AGENT_ID: id });
+  assert.deepEqual(run(""), { days: {}, failures: [] }, "unclaimed: nothing reported, nothing failed");
+  const named = run("main");
+  assert.deepEqual(named.failures, []);
+  assert.deepEqual(Object.keys(named.days), ["2026-09-23"], "named by id: that store is reported");
 });
