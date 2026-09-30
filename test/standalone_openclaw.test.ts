@@ -6,6 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import Database from "better-sqlite3";
+import { createEmptyHermesStore } from "./hermes-store";
 
 // The standalone client is the copy that ships inside a container, so this
 // drives the real script rather than a re-implementation of it.
@@ -33,18 +34,9 @@ db.commit()
 
 /** What the collector makes of that root, read back through the client itself. */
 function collected(root: string, env: Record<string, string> = {}): Record<string, Record<string, Record<string, number>>> {
-  const out = execFileSync("python3", ["-c", `
-import json, sys
-source = open(sys.argv[1]).read().split("def main(")[0]
-namespace = {"__name__": "collector"}
-exec(compile(source, sys.argv[1], "exec"), namespace)
-days = namespace["from_openclaw"](28, state=sys.argv[2])
-print(json.dumps({d: {m: dict(v) for m, v in ms.items()} for d, ms in days.items()}))
-print(json.dumps(namespace["FAILURES"]))
-`, CLIENT, root], { encoding: "utf8", env: { ...process.env, ...env } });
-  const [days, failures] = out.trim().split("\n");
-  assert.deepEqual(JSON.parse(failures), [], "a readable store must not report a failure");
-  return JSON.parse(days);
+  const { days, failures } = collectedWithFailures(root, env);
+  assert.deepEqual(failures, [], "a readable store must not report a failure");
+  return days;
 }
 
 let call = 0;
@@ -193,4 +185,117 @@ namespace["from_openclaw"](28, state=sys.argv[2])
 print(json.dumps(namespace["FAILURES"]))
 `, CLIENT, root], { encoding: "utf8" });
   assert.match(JSON.parse(out.trim())[0], /compressed transcript event would not decompress/);
+});
+
+/** from_openclaw over a root (or, omitted, wherever it finds one), returning
+ *  what it collected AND what it called a failure. */
+function collectedWithFailures(root?: string, env: Record<string, string> = {}) {
+  const out = execFileSync("python3", ["-c", `
+import json, sys
+source = open(sys.argv[1]).read().split("def main(")[0]
+namespace = {"__name__": "collector"}
+exec(compile(source, sys.argv[1], "exec"), namespace)
+days = namespace["from_openclaw"](28, state=sys.argv[2] or None)
+print(json.dumps({d: {m: dict(v) for m, v in ms.items()} for d, ms in days.items()}))
+print(json.dumps(namespace["FAILURES"]))
+`, CLIENT, root ?? ""], { encoding: "utf8", env: { ...process.env, OPENCLAW_AGENT_ID: "", ...env } });
+  // The last two lines: a collector may print a note before them.
+  const [days, failures] = out.trim().split("\n").slice(-2);
+  return { days: JSON.parse(days), failures: JSON.parse(failures) as string[] };
+}
+
+/** Two agents under one OpenClaw root -- a laptop that runs both. */
+function twoAgentRoot(): string {
+  const root = store([usage("m", { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 })], "milo");
+  const other = store([usage("m", { input: 99, output: 0, cacheRead: 0, cacheWrite: 0 })], "sitemaxxing");
+  fs.cpSync(path.join(other, "agents", "sitemaxxing"), path.join(root, "agents", "sitemaxxing"), { recursive: true });
+  return root;
+}
+
+test("several agents and no OPENCLAW_AGENT_ID is a failure, never their sum", () => {
+  const { days, failures } = collectedWithFailures(twoAgentRoot());
+  assert.deepEqual(days, {}, "neither agent's usage may be reported as this install's");
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /2 agents .*OPENCLAW_AGENT_ID/);
+});
+
+test("OPENCLAW_AGENT_ID reports that one agent's store and nothing else", () => {
+  const { days, failures } = collectedWithFailures(twoAgentRoot(), { OPENCLAW_AGENT_ID: "milo" });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(days, { "2026-09-23": { m: { input: 10, output: 0, cache_read: 0, cache_write: 0 } } });
+  const missing = collectedWithFailures(twoAgentRoot(), { OPENCLAW_AGENT_ID: "nope" });
+  assert.deepEqual(missing.days, {});
+  assert.match(missing.failures[0], /no store for agent 'nope'/);
+});
+
+test("nothing else on the machine is reported: a coding tool's usage never reaches the payload", () => {
+  // The whole-machine scan this replaced: an agentsview on the machine that
+  // would have added the laptop's Claude Code day to this agent's report.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-machine-"));
+  const bin = path.join(home, ".local", "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "agentsview"), `#!/bin/sh
+echo '[{"date":"2026-09-23","modelBreakdowns":[{"modelName":"claude-opus-5","inputTokens":580000000}]}]'
+`, { mode: 0o755 });
+  fs.mkdirSync(path.join(home, ".agent-index"));
+  fs.writeFileSync(path.join(home, ".agent-index", ".agent-index.json"),
+    JSON.stringify({ install_id: "install-test", key: "aik_" + "k".repeat(43) }), { mode: 0o600 });
+  const root = store([usage("z-ai/glm-5.2", { input: 10, output: 1, cacheRead: 0, cacheWrite: 0 })]);
+  const out = execFileSync("python3", [CLIENT, "--agent", "x", "--dry-run"], {
+    encoding: "utf8",
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, OPENCLAW_STATE_DIR: root,
+           AGENT_INDEX_API: "http://127.0.0.1:9" },
+  });
+  assert.match(out, /z-ai\/glm-5\.2/, "the agent's own usage is reported");
+  assert.doesNotMatch(out, /claude-opus-5/, "the machine's other usage is not");
+});
+
+test("the host's default ~/.openclaw is not claimed without an id, and is not a failure", () => {
+  // Nothing ties a guessed root's only store to --agent: on a laptop it is
+  // whatever OpenClaw the host runs.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-host-"));
+  fs.cpSync(store([usage("m", { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 })]), path.join(home, ".openclaw"), { recursive: true });
+  const run = (id: string) => collectedWithFailures(undefined,
+    { HOME: home, OPENCLAW_STATE_DIR: "", OPENCLAW_AGENT_ID: id });
+  assert.deepEqual(run(""), { days: {}, failures: [] }, "unclaimed: nothing reported, nothing failed");
+  const named = run("main");
+  assert.deepEqual(named.failures, []);
+  assert.deepEqual(Object.keys(named.days), ["2026-09-23"], "named by id: that store is reported");
+});
+
+/** The whole client, dry-run, on a machine whose only OpenClaw is the default ~/.openclaw. */
+function hostRun(withHermes: boolean) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-hostrun-"));
+  fs.cpSync(store([usage("m", { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 })], "helper"),
+            path.join(home, ".openclaw"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".agent-index"));
+  fs.writeFileSync(path.join(home, ".agent-index", ".agent-index.json"),
+    JSON.stringify({ install_id: "install-test", key: "aik_" + "k".repeat(43) }), { mode: 0o600 });
+  if (withHermes) createEmptyHermesStore(path.join(home, ".hermes"));
+  try {
+    const out = execFileSync("python3", [CLIENT, "--agent", "x", "--dry-run"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      env: { PATH: process.env.PATH!, HOME: home, AGENT_INDEX_API: "http://127.0.0.1:9" },
+    });
+    return { ok: true, out };
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string };
+    return { ok: false, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+  }
+}
+
+test("an unclaimed default OpenClaw that is the only thing found fails loudly, naming the one setting", () => {
+  // A single-agent host install relying on ~/.openclaw used to report its
+  // agent; reporting nothing in silence would read as a broken agent for days.
+  const { ok, out } = hostRun(false);
+  assert.equal(ok, false, "it must not pass as a quiet zero");
+  assert.match(out, /Set OPENCLAW_AGENT_ID to your agent's id/);
+  assert.match(out, /found: helper/, "and it names the agent it saw");
+  assert.match(out, /Nothing is wrong with your setup/);
+});
+
+test("a Hermes reporter on a machine that also runs OpenClaw keeps reporting", () => {
+  const { ok, out } = hostRun(true);
+  assert.equal(ok, true, out);
+  assert.doesNotMatch(out, /COLLECTOR FAILED/);
 });

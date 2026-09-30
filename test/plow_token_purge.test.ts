@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { standIns, PLOW_TOKEN, ASSERTION, MINTED_KEY, type StandIns } from "./fake-plow-index";
+import { createEmptyHermesStore } from "./hermes-store";
 
 // The standalone client is the copy that ships inside a container, so these
 // drive the real script rather than a re-implementation of it.
@@ -217,77 +217,6 @@ test("the image ships the client this repo builds", () => {
     `${home} holds the install id, so the image has to declare it as a volume`);
 });
 
-/** Install a stand-in agentsview in a home, running `body`.
- *
- *  Always, even where a test does not care what the collector says: the client
- *  falls back to /opt/homebrew/bin and /usr/local/bin, which are ABSOLUTE, so
- *  a machine with the real agentsview installed would run it and collect that
- *  developer's own usage into the test.
- */
-function stubAgentsView(home: string, body: string) {
-  const bin = path.join(home, "bin");
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, "agentsview"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  fs.mkdirSync(path.join(home, ".local"), { recursive: true });
-  fs.symlinkSync(bin, path.join(home, ".local", "bin"));   // where the client looks
-}
-
-/** A home with a stand-in agentsview that records the environment it was given.
- *  Both env tests need the same thing: an installed collector, a place for it
- *  to write what it saw, and a client run that invokes it. */
-function withFakeAgentsView() {
-  const home = homeWith(KEY);   // a report needs a stored key BEFORE it collects
-  const seen = path.join(home, "seen.txt");
-  stubAgentsView(home, `env > ${seen}\necho '[]'`);
-  return {
-    home,
-    /** Run a collection and return the environment the child actually received. */
-    childEnv(env: Record<string, string | undefined>) {
-      client(["--agent", "x", "--dry-run"], home, env);
-      assert.ok(fs.existsSync(seen), "the stand-in agentsview should have run");
-      return fs.readFileSync(seen, "utf8");
-    },
-  };
-}
-
-test("the Plow token is never handed to the agentsview binary", () => {
-  // agentsview is separately installed: we do not ship it, cannot audit it, and
-  // it has no use for the credential that identifies this agent's owner. The
-  // inherited environment handed it over on every run.
-  const av = withFakeAgentsView();
-  const childEnv = av.childEnv({
-    PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel",   // pragma: allowlist secret
-    SOME_OTHER_SECRET: "also-not-for-a-child",             // pragma: allowlist secret
-  });
-  assert.doesNotMatch(childEnv, /plow-token-that-must-not-travel/,  // pragma: allowlist secret
-    "the child must never see the Plow token");
-  assert.doesNotMatch(childEnv, /also-not-for-a-child/,             // pragma: allowlist secret
-    "an allowlist, so a secret we have not thought of yet is also withheld");
-  assert.match(childEnv, /^PATH=/m, "but it still gets what it needs to run");
-});
-
-test("agentsview keeps its own configuration", () => {
-  // Withholding a secret must not withhold the tool's own settings: an install
-  // that points agentsview at its data through one of these and does not get it
-  // back reads the DEFAULT location and reports a total that is WRONG rather
-  // than absent. The list comes from `agentsview --help` (v0.38.1).
-  const CONFIG = {
-    AGENTSVIEW_DATA_DIR: "/tmp/av-data",
-    CLAUDE_PROJECTS_DIR: "/tmp/claude-projects",
-    CODEX_SESSIONS_DIR: "/tmp/codex-sessions",
-    CURSOR_PROJECTS_DIR: "/tmp/cursor-projects",
-    OPENCODE_DIR: "/tmp/opencode",
-    ZED_DIR: "/tmp/zed",
-  };
-  const av = withFakeAgentsView();
-  const childEnv = av.childEnv({ ...CONFIG, PLOW_AGENT_TOKEN: "plow-token-that-must-not-travel" }); // pragma: allowlist secret
-  for (const [k, v] of Object.entries(CONFIG)) {
-    assert.match(childEnv, new RegExp(`^${k}=${v}$`, "m"), `${k} must reach agentsview`);
-  }
-  assert.doesNotMatch(childEnv, /plow-token-that-must-not-travel/,  // pragma: allowlist secret
-    "and the token still must not");
-});
-
 test("a failed tag read fails the command", () => {
   // Returning [] said "no tags are in use", which is a real answer to a
   // different question, and --tags exited 0 having read nothing.
@@ -368,7 +297,6 @@ async function withStandIns<T>(body: (s: StandIns) => Promise<T>, mintDelayMs = 
 /** A home wired to the stand-ins, with a collector that finds nothing. */
 function bootstrapHome(s: { plow: string; index: string }) {
   const home = homeWith();               // a fresh install: nothing stored
-  stubAgentsView(home, "echo '[]'");
   return {
     home,
     env: {
@@ -533,8 +461,7 @@ test("a report prefers the stored key even while a Plow token is exported", asyn
   const s = await standIns();
   try {
     const home = homeWith(MINTED_KEY);       // already bootstrapped
-    stubAgentsView(home, "echo '[]'");
-    const r = await clientAsync(["--agent", "purge-test"], home, {
+      const r = await clientAsync(["--agent", "purge-test"], home, {
       PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow,
       AGENT_INDEX_API: s.index, HERMES_HOME: undefined,
     });
@@ -576,7 +503,6 @@ test("--delete-story removes that one story with the stored key", async () => {
  *  image sets HERMES_HOME=/opt/data and mounts it, which is what this is. */
 function volumeHome(s: { plow: string; index: string }, volume?: string) {
   const home = homeWith();
-  stubAgentsView(home, "echo '[]'");
   const data = volume || fs.mkdtempSync(path.join(os.tmpdir(), "aic-volume-"));
   return {
     home, data,
@@ -589,15 +515,6 @@ function volumeHome(s: { plow: string; index: string }, volume?: string) {
 
 /** The one file: which install this is, and the key that reports for it. */
 const stateFile = (dir: string) => path.join(dir, ".agent-index.json");
-/** A Hermes store with nothing in it: enough for the collector to read, which
- *  is all these cases need. One schema, because two drift. */
-function createEmptyHermesStore(dir: string) {
-  fs.mkdirSync(dir, { recursive: true });
-  const db = new Database(path.join(dir, "state.db"));
-  db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
-          " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
-  db.close();
-}
 const stateOf = (dir: string) =>
   JSON.parse(fs.readFileSync(stateFile(dir), "utf8")) as { install_id?: string; key?: string };
 const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
@@ -733,8 +650,7 @@ test("the install id does not move when a Hermes store appears later", () =>
     // the install arrives at its next registration with no id, mints a second
     // one, and strands everything the first wrote.
     const home = homeWith();
-    stubAgentsView(home, "echo '[]'");
-    const env = { PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
+      const env = { PLOW_AGENT_TOKEN: PLOW_TOKEN, PLOW_API_BASE: s.plow, AGENT_INDEX_API: s.index,
                   HERMES_HOME: undefined } as Record<string, string | undefined>;
     assert.equal((await clientAsync(["--register", "--agent", "purge-test"], home, env)).code, 0);
     const mine = String(askedInstall(s));

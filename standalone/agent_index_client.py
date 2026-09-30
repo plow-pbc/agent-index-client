@@ -12,16 +12,14 @@
     agent_index_client.py status                    # 0 registered, 3 not, 2 cannot tell
     agent_index_client.py --self-check
 
-Collects from three places, because none alone covers a real machine:
-  * agentsview, the same index the Builder Index client reads. Rich and correct
-    for claude and codex. Measured on v0.38.1: grok reports zero, fixed
-    upstream in 0.39.0; hermes reports zero with no fix known.
-  * the Hermes store directly, because of that hermes gap — Hermes is what our
-    own agents run on, so relying on agentsview alone puts them on the board at
-    zero.
-  * the OpenClaw store directly, for the same reason: current OpenClaw keeps
-    transcripts in per-agent SQLite rather than the session files agentsview
-    reads, so an OpenClaw agent reports zero without it.
+Collects from the agent's OWN store, and nothing else on the machine:
+  * the Hermes store (HERMES_HOME), which is one agent's sessions;
+  * the OpenClaw store for one agent: `agents/<id>/` under OPENCLAW_STATE_DIR,
+    picked by OPENCLAW_AGENT_ID, or the only one there is. Several agents and
+    no id is a failure, never a sum.
+There is deliberately no whole-machine scan. It used to run agentsview, which
+counts every coding tool on the device (Claude Code, Codex, ...), so a
+laptop's unrelated work was reported as this agent's usage (card f2bc8633c1).
 
 Sends, per call: --register posts the page content you hand it (agent id,
 name, blurb, repo, runtime, video, images, install-url, logo, what it does,
@@ -132,10 +130,15 @@ TOKEN_PATH = os.path.expanduser("~/.agent-index/token")
 KEYS = ("input", "output", "cache_read", "cache_write")
 
 # Collectors append here when a read genuinely FAILED, as opposed to finding
-# nothing. Without the distinction a broken agentsview or a SQLite error is
+# nothing. Without the distinction an unreadable store or a SQLite error is
 # reported as an idle agent, which is the one thing this client must never do:
 # it publishes a number people compare agents on.
 FAILURES = []
+
+# Set by from_hermes when no Hermes store turned up and none was named. Read by
+# from_openclaw, which main() runs after it: an unclaimed OpenClaw store is then
+# the only thing this machine could be reporting, and must not pass in silence.
+HERMES_ABSENT = False
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -413,40 +416,6 @@ def token():
              + WHERE_TO_GET_A_TOKEN)
 
 
-def from_agentsview(days):
-    """date -> model -> counters, for whatever agentsview covers."""
-    exe = next((p for p in (os.path.expanduser("~/.local/bin/agentsview"),
-                            "/opt/homebrew/bin/agentsview", "/usr/local/bin/agentsview")
-                if os.access(p, os.X_OK)), None)
-    if not exe:
-        print("  agentsview not installed — skipping that collector")
-        return {}
-    try:
-        raw = subprocess.run([exe, "usage", "daily", "--json"], capture_output=True,
-                             text=True, timeout=120, env=_child_env()).stdout
-        rows = json.loads(raw)
-    except Exception as e:
-        # Say it. Swallowing this made a broken agentsview indistinguishable
-        # from an agent that did nothing, and the index would show it idle.
-        FAILURES.append(f"agentsview: {type(e).__name__}: {e}")
-        return {}
-    rows = rows if isinstance(rows, list) else rows.get("daily") or rows.get("data") or []
-    out = {}
-    for r in rows[-days:]:
-        models = {}
-        for m in r.get("modelBreakdowns") or []:
-            name = m.get("modelName") or m.get("model")
-            if not name:
-                continue
-            models[name] = {"input": m.get("inputTokens") or 0,
-                            "output": m.get("outputTokens") or 0,
-                            "cache_read": m.get("cacheReadTokens") or 0,
-                            "cache_write": m.get("cacheCreationTokens") or 0}
-        if models:
-            out[r["date"]] = models
-    return out
-
-
 STATE_PATH = os.path.expanduser("~/.agent-index/hermes-state.json")
 
 
@@ -488,36 +457,6 @@ def _save_state(path, state):
     """A half-written ledger would misreport, and a partial rename would lose
     the baseline and re-dump history on the next run."""
     save_private(path or STATE_PATH, json.dumps(state))
-
-
-# agentsview is a separately installed executable. Handing it our whole
-# environment hands it PLOW_AGENT_TOKEN -- the credential that identifies this
-# agent's owner -- on every single run, to a binary we do not ship, cannot
-# audit, and which has no use for it. An allowlist rather than a blocklist: a
-# blocklist is a promise to remember every future secret, and this process holds
-# whatever the container put in it.
-CHILD_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ",
-                  "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
-
-# agentsview's OWN configuration, from `agentsview --help` (v0.38.1), not from
-# memory. Everything with an AGENTSVIEW_ prefix passes by the rule below; these
-# are the ones that do not carry it -- the per-runtime source directories. An
-# install that points agentsview at its data through one of these and does not
-# get it back reads the DEFAULT location, finds little or nothing there, and
-# reports a total that is wrong rather than absent.
-AGENTSVIEW_SOURCE_DIRS = (
-    "CLAUDE_PROJECTS_DIR", "CODEX_SESSIONS_DIR", "COPILOT_DIR", "GEMINI_DIR",
-    "OPENCODE_DIR", "CURSOR_PROJECTS_DIR", "IFLOW_DIR", "AMP_DIR", "ZED_DIR",
-    "QWEN_PROJECTS_DIR", "QWENPAW_DIR", "OMP_DIR", "DEEPSEEK_TUI_SESSIONS_DIR",
-    "QCLAW_DIR", "WORKBUDDY_PROJECTS_DIR", "PIEBALD_DIR",
-)
-
-
-def _child_env():
-    env = {k: v for k, v in os.environ.items()
-           if k in CHILD_ENV_KEEP or k in AGENTSVIEW_SOURCE_DIRS or k.startswith("AGENTSVIEW_")}
-    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
-    return env
 
 
 # What the collector actually reads. A table of the right NAME with none of
@@ -675,6 +614,42 @@ def from_openclaw(days, state=None):
     if configured and not stores:
         FAILURES.append(f"openclaw: no store under {root} (OPENCLAW_STATE_DIR names it)")
         return {}
+    # ONE agent's store, never the sum of every agent under the root: two
+    # OpenClaw agents on one machine each reported both agents' usage, so the
+    # same pile was credited to two listings (card f2bc8633c1). Named by
+    # OPENCLAW_AGENT_ID, or the only store there is -- a Plow container holds
+    # exactly one. Several and no name is a failure, not a guess.
+    wanted = os.environ.get("OPENCLAW_AGENT_ID")
+    if not wanted and not configured and stores:
+        # A guessed ~/.openclaw is the host's OpenClaw, not necessarily this
+        # agent's: nothing ties its store to --agent. Not claimed without an id,
+        # and not a failure either -- a Hermes agent's reporter on a laptop
+        # that also runs OpenClaw must still report.
+        if HERMES_ABSENT:
+            # Nothing else here to report, so this store is almost certainly the
+            # agent's, and a quiet zero would go unnoticed for days. Say it, in
+            # words for the person running it: their setup was fine before.
+            ids = sorted(os.path.basename(os.path.dirname(os.path.dirname(s))) for s in stores)
+            FAILURES.append(
+                f"OpenClaw usage was found in {root}, but this reporter does not know which "
+                f"OpenClaw agent it reports for, so it sent nothing this time. Set "
+                f"OPENCLAW_AGENT_ID to your agent's id -- its folder name under "
+                f"{os.path.join(root, 'agents')} (found: {', '.join(ids)}) -- and run it again. "
+                "Nothing is wrong with your setup: the reporter now counts only the agent's "
+                "own usage, and needs that one setting to know which agent that is.")
+            return {}
+        print(f"  OpenClaw found under {root} but not claimed: set OPENCLAW_AGENT_ID "
+              "(or OPENCLAW_STATE_DIR) if it is this agent's")
+        return {}
+    if wanted:
+        stores = [s for s in stores if os.path.basename(os.path.dirname(os.path.dirname(s))) == wanted]
+        if not stores:
+            FAILURES.append(f"openclaw: no store for agent '{wanted}' under {root} (OPENCLAW_AGENT_ID names it)")
+            return {}
+    elif len(stores) > 1:
+        FAILURES.append(f"openclaw: {len(stores)} agents under {root}; set OPENCLAW_AGENT_ID "
+                        "to the one this install reports, rather than summing them all")
+        return {}
     # `created_at` is epoch milliseconds, and the cutoff is the START of the
     # oldest local day in the window, not the instant `days` ago: buckets are
     # local calendar days, and cutting mid-day would post that day's tail as if
@@ -753,7 +728,7 @@ def from_openclaw(days, state=None):
 
 
 def from_hermes(days, home=None, state_path=None):
-    """Hermes' own store, which agentsview indexes but reports as all zeros.
+    """Hermes' own store: one agent's sessions, in one home.
 
     Its four counters are disjoint (prompt = input + cache_read + cache_write)
     and reasoning is a subset of output, so nothing here is double counted.
@@ -832,13 +807,15 @@ def from_hermes(days, home=None, state_path=None):
             # Somebody named this path, and there is nothing there. That is a
             # collector that FAILED, not one with nothing to say -- and the
             # difference is the whole report: recorded as a failure it stops the
-            # run, while returning empty lets an agentsview-only payload post
+            # run, while returning empty lets an OpenClaw-only payload post
             # and REPLACE this agent's totals with numbers that omit Hermes.
             FAILURES.append(f"hermes store {db}: configured but missing")
         else:
             # Nobody said where Hermes lives and no store turned up in the usual
             # places. An agent that does not run Hermes is the common case.
             print(f"  no Hermes store at {db} (set HERMES_HOME if that is wrong)")
+            global HERMES_ABSENT
+            HERMES_ABSENT = True
         return {}
     # Snapshot-and-diff, because the counters are CUMULATIVE per session.
     #
@@ -1298,7 +1275,7 @@ def main(argv):
     # should be answered with the typo, not with a demand for a credential.)
     auth_headers()
     days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 28
-    payload = {"days": merge(from_agentsview(days), from_hermes(days), from_openclaw(days))}
+    payload = {"days": merge(from_hermes(days), from_openclaw(days))}
     total = sum(m[k] for d in payload["days"] for m in d["models"] for k in KEYS)
     for f in FAILURES:
         print(f"  COLLECTOR FAILED — {f}")
@@ -1313,7 +1290,7 @@ def main(argv):
         sys.exit("  a collector failed — NOT reporting a partial total, "
                  "which would replace correct numbers with smaller ones")
     if not payload["days"]:
-        print("  nothing collected — check HERMES_HOME and that agentsview is installed")
+        print("  nothing collected — check HERMES_HOME / OPENCLAW_STATE_DIR")
     if "--dry-run" in argv:
         return print(json.dumps(payload, indent=1)[:2000])
     if not payload["days"]:
@@ -1608,7 +1585,7 @@ def self_check():
 
     # A collector that FAILED stops the report, even when another collector
     # produced numbers. The server replaces a (day, model) total with what it is
-    # sent, so a Hermes-only merge posted while agentsview was broken overwrites
+    # sent, so a Hermes-only merge posted while OpenClaw failed overwrites
     # a correct total with a smaller one -- the agent then reads as having done
     # less work than it did, which is worse than a gap.
     with tempfile.TemporaryDirectory() as partial:
@@ -1620,18 +1597,15 @@ def self_check():
         c5.execute("UPDATE session_model_usage SET input_tokens = 25 WHERE session_id='s'")
         c5.commit(); c5.close()
 
-        # An agentsview that is installed and broken -- the case that matters.
-        # Not installed is not a failure and must still report.
-        binpath = os.path.join(partial, ".local", "bin")
-        os.makedirs(binpath)
-        av = os.path.join(binpath, "agentsview")
-        with open(av, "w") as f:
-            f.write("#!/bin/sh\necho 'not json at all'\n")
-        os.chmod(av, 0o755)
+        # An OpenClaw root that is configured and holds no store -- a collector
+        # that FAILED while Hermes had numbers.
+        claw = os.path.join(partial, "openclaw-empty")
+        os.makedirs(claw)
 
         r = subprocess.run([sys.executable, os.path.abspath(__file__), "--agent", "x"],
                            capture_output=True, text=True,
                            env=dict(os.environ, HOME=partial, HERMES_HOME=partial,
+                                    OPENCLAW_STATE_DIR=claw,
                                     PLOW_AGENT_TOKEN="plow-token-for-this-check",
                                     AGENT_INDEX_API="http://127.0.0.1:9"))
         out = r.stdout + r.stderr
@@ -1664,7 +1638,7 @@ def self_check():
         f"a quiet run reports nothing and succeeds; it must not fail: {quiet.stdout[-200:]}"
 
     # A store somebody CONFIGURED and that is absent is the opposite case: it
-    # must fail, and must not post. Reported as quiet, an agentsview-only
+    # must fail, and must not post. Reported as quiet, an OpenClaw-only
     # payload would replace this agent's totals with numbers omitting Hermes.
     with tempfile.TemporaryDirectory() as no_store:
         gone = subprocess.run(
