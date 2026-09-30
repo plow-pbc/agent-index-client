@@ -261,3 +261,48 @@ test("the host's default ~/.openclaw is not claimed without an id, and is not a 
   assert.deepEqual(named.failures, []);
   assert.deepEqual(Object.keys(named.days), ["2026-09-23"], "named by id: that store is reported");
 });
+
+/** The whole client, dry-run, on a machine whose only OpenClaw is the default ~/.openclaw. */
+function hostRun(withHermes: boolean) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aic-hostrun-"));
+  fs.cpSync(store([usage("m", { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 })], "helper"),
+            path.join(home, ".openclaw"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".agent-index"));
+  fs.writeFileSync(path.join(home, ".agent-index", ".agent-index.json"),
+    JSON.stringify({ install_id: "install-test", key: "aik_" + "k".repeat(43) }), { mode: 0o600 });
+  if (withHermes) {
+    fs.mkdirSync(path.join(home, ".hermes"));
+    execFileSync("python3", ["-c", `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT, output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)")
+c.commit()
+`, path.join(home, ".hermes", "state.db")]);
+  }
+  try {
+    const out = execFileSync("python3", [CLIENT, "--agent", "x", "--dry-run"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      env: { PATH: process.env.PATH!, HOME: home, AGENT_INDEX_API: "http://127.0.0.1:9" },
+    });
+    return { ok: true, out };
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string };
+    return { ok: false, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+  }
+}
+
+test("an unclaimed default OpenClaw that is the only thing found fails loudly, naming the one setting", () => {
+  // A single-agent host install relying on ~/.openclaw used to report its
+  // agent; reporting nothing in silence would read as a broken agent for days.
+  const { ok, out } = hostRun(false);
+  assert.equal(ok, false, "it must not pass as a quiet zero");
+  assert.match(out, /Set OPENCLAW_AGENT_ID to your agent's id/);
+  assert.match(out, /found: helper/, "and it names the agent it saw");
+  assert.match(out, /Nothing is wrong with your setup/);
+});
+
+test("a Hermes reporter on a machine that also runs OpenClaw keeps reporting", () => {
+  const { ok, out } = hostRun(true);
+  assert.equal(ok, true, out);
+  assert.doesNotMatch(out, /COLLECTOR FAILED/);
+});

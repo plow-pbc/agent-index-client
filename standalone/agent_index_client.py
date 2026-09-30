@@ -134,6 +134,11 @@ KEYS = ("input", "output", "cache_read", "cache_write")
 # it publishes a number people compare agents on.
 FAILURES = []
 
+# Set by from_hermes when no Hermes store turned up and none was named. Read by
+# from_openclaw, which main() runs after it: an unclaimed OpenClaw store is then
+# the only thing this machine could be reporting, and must not pass in silence.
+HERMES_ABSENT = False
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse every redirect. urlopen follows them by default, which would
@@ -619,6 +624,19 @@ def from_openclaw(days, state=None):
         # agent's: nothing ties its store to --agent. Not claimed without an id,
         # and not a failure either -- a Hermes agent's reporter on a laptop
         # that also runs OpenClaw must still report.
+        if HERMES_ABSENT:
+            # Nothing else here to report, so this store is almost certainly the
+            # agent's, and a quiet zero would go unnoticed for days. Say it, in
+            # words for the person running it: their setup was fine before.
+            ids = sorted(os.path.basename(os.path.dirname(os.path.dirname(s))) for s in stores)
+            FAILURES.append(
+                f"OpenClaw usage was found in {root}, but this reporter does not know which "
+                f"OpenClaw agent it reports for, so it sent nothing this time. Set "
+                f"OPENCLAW_AGENT_ID to your agent's id -- its folder name under "
+                f"{os.path.join(root, 'agents')} (found: {', '.join(ids)}) -- and run it again. "
+                "Nothing is wrong with your setup: the reporter now counts only the agent's "
+                "own usage, and needs that one setting to know which agent that is.")
+            return {}
         print(f"  OpenClaw found under {root} but not claimed: set OPENCLAW_AGENT_ID "
               "(or OPENCLAW_STATE_DIR) if it is this agent's")
         return {}
@@ -795,6 +813,8 @@ def from_hermes(days, home=None, state_path=None):
             # Nobody said where Hermes lives and no store turned up in the usual
             # places. An agent that does not run Hermes is the common case.
             print(f"  no Hermes store at {db} (set HERMES_HOME if that is wrong)")
+            global HERMES_ABSENT
+            HERMES_ABSENT = True
         return {}
     # Snapshot-and-diff, because the counters are CUMULATIVE per session.
     #

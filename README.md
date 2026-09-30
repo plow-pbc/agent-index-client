@@ -201,7 +201,9 @@ Only the agent's **own** store. Nothing else on the machine is read:
   `~/.openclaw`). `<id>` is `OPENCLAW_AGENT_ID` when set, or the only agent
   under a root you named with `OPENCLAW_STATE_DIR`, which is the case in a Plow
   container. The default `~/.openclaw` is the host's OpenClaw and is read only
-  with `OPENCLAW_AGENT_ID`. Several agents with no `OPENCLAW_AGENT_ID` stops
+  with `OPENCLAW_AGENT_ID`. Without it, that store is skipped when a Hermes
+  store is present; when it is the only thing found, the run stops and says to
+  set `OPENCLAW_AGENT_ID`, rather than reporting a silent zero. Several agents with no `OPENCLAW_AGENT_ID` stops
   the run instead of summing them. Setting
   `OPENCLAW_STATE_DIR` to a directory holding no store is a misconfiguration
   and stops the run too.
