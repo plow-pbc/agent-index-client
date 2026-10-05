@@ -1,1 +1,16 @@
+# Repos a reviewer of THIS repo may search and cite, materialized under
+# .siblings/<owner>/<repo>. Declared rather than left to the fallback so
+# the set is the one this repo actually depends on.
+#
+# One per line. The reviewer host must also carry a SOURCE_PATHS entry for
+# each, or the sibling reports as `missing` and is never searched.
+#
+# Each row is a real edge: `tkmx-server` is the tokenmaxxing server that
+# reporter/ still posts to by default (SERVER_URL); `agent-index-server` is
+# the index standalone/agent_index_client.py registers agents and reports
+# usage to (INDEX_ORIGIN); and `plow` owns the Plow API that client calls
+# for identity (PLOW_API_BASE, /v1/auth/index-identity).
+
 plow-pbc/tkmx-server
+plow-pbc/agent-index-server
+plow-pbc/plow
