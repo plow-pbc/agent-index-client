@@ -609,7 +609,7 @@ const askedInstall = (s: { indexHits: { path: string; body?: unknown }[] }) =>
 // that takes the home away.
 for (const [start, seed] of [
   ["a first install", () => {}],
-  ["an install with a ledger and no token", (home: string, data: string) =>
+  ["an install with a ledger and no token", (_home: string, data: string) =>
     fs.writeFileSync(path.join(data, ".agent-index-state.json"), '{"version":1,"snapshot":{},"daily":{}}')],
   ["an install that registered before install ids", (home: string) => {
     fs.mkdirSync(path.dirname(tokenPath(home)), { recursive: true });
