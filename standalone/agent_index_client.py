@@ -728,19 +728,17 @@ def from_openclaw(days, state=None):
                 continue
             # One LLM call, counted once. A checkpoint fork or a store copied
             # between roots repeats the same event, and `responseId` is what
-            # the canonical collector (reporter/openclaw.ts) keys on to tell
-            # those apart from two calls that merely look alike.
+            # tells those apart from two calls that merely look alike.
             response = message.get("responseId")
             if response is not None:
                 if response in seen:
                     continue
                 seen.add(response)
             # The event's own timestamp when it has one -- `created_at` is when
-            # the row was written -- and the LOCAL calendar date either way, the
-            # rule reporter/openclaw.ts already follows: a UTC date splits one
-            # user-perceived day in two near local midnight, and the same moment
-            # would land on a different dashboard day than this machine's
-            # claude and codex rows.
+            # the row was written -- and the LOCAL calendar date either way: a
+            # UTC date splits one user-perceived day in two near local midnight,
+            # and the same moment would land on a different dashboard day than
+            # this machine's claude and codex rows.
             stamp = _stamp_ms(event.get("timestamp"), created_at)
             date = datetime.datetime.fromtimestamp(stamp / 1000).date().isoformat()
             row = out[date][message.get("model") or "unknown"]

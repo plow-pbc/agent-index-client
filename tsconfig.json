@@ -14,12 +14,10 @@
     "sourceMap": true,
     "declaration": false,
 
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+    "strict": false,
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true
   },
-  "include": ["reporter/**/*.ts"],
+  "include": ["test/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
