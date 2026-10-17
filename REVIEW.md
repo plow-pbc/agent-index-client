@@ -18,7 +18,7 @@ gets it inlined into `.roborev.toml` by `just sync-review-config` in the
 **Distribution model:** Internal only; no external customer deployments.
 
 **Architectural commitments:**
-- Keep the reporter cron self-contained and restartable; it runs unattended every 2 hours. Source is `reporter/report.ts`; installed units run the compiled `dist/reporter/report.js` (`reporter/report.js` is only a shim for pre-migration installs).
+- The product is `standalone/agent_index_client.py`: one Python file, no build step, run unattended by each agent's reporter service. Keep it self-contained and restartable.
 - Fail-fast on config or credential errors — do not silently skip reporting cycles.
 
 **Known near-term migrations / roadmap items:**
@@ -32,13 +32,13 @@ gets it inlined into `.roborev.toml` by `just sync-review-config` in the
 
 **Stage:** Internal tool, single-digit operators, no external user surface. Iteration is rapid and the operator (also the engineer) can re-run anything that fails. Engineer-hours are the bottleneck. Matches § Product context above.
 
-**Cultural emphasis:** RAPID ITERATION + FAIL LOUDLY. The operator notices when the reporter cron silently skips a cycle — much faster than they notice when the code grows a defensive guard for a scenario that won't happen. Loud breaks > silent skips. The universal Broken-Glass posture (questions over prescriptions, cost-naming for additive remedies, declarative voice for high-confidence bugs only) lives in `standards.md` § Broken-Glass Test — apply it here, especially: scope-creep findings must name the cost ("adds complexity and makes PMF iteration harder").
+**Cultural emphasis:** RAPID ITERATION + FAIL LOUDLY. The operator notices when the client silently skips a reporting cycle — much faster than they notice when the code grows a defensive guard for a scenario that won't happen. Loud breaks > silent skips. The universal Broken-Glass posture (questions over prescriptions, cost-naming for additive remedies, declarative voice for high-confidence bugs only) lives in `standards.md` § Broken-Glass Test — apply it here, especially: scope-creep findings must name the cost ("adds complexity and makes PMF iteration harder").
 
 **Repo-specific contrast pairs:** beyond the universal set in `standards.md`:
 
 | Architecture bloat — DON'T (in this repo) | Bugfix — DO |
 |---|---|
-| Push for retry-with-backoff on the reporter cron — it runs every 2h, the operator notices a missed cycle, re-running is one command. | Catch a real failure mode that drops a cycle silently (swallowed exception, soft fallback that hides a credential error). |
+| Push for retry-with-backoff on the reporting cycle — it runs unattended, the operator notices a missed cycle, re-running is one command. | Catch a real failure mode that drops a cycle silently (swallowed exception, soft fallback that hides a credential error). |
 | Suggest a config-validation framework for a config file with five keys read at startup. | Fail loudly on missing/malformed config keys at startup — the operator gets a clear error, not a quiet skip. |
 | Add a queue / job runner / abstraction layer for unattended scripts running once every 2h. | Make the script idempotent so a re-run after a partial failure produces the right end state. |
 | Push for tests of internal cron mechanics (timer wakeups, tick alignment) where the OS is the actual source of truth. | Add a behavior test for what the script actually emits when given a known input. |

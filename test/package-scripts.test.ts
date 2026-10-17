@@ -7,7 +7,7 @@ const PACKAGE_JSON = JSON.parse(
   fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf-8"),
 ) as { scripts?: Record<string, string> };
 
-const BUILD_SCRIPT_NAMES = ["build", "build:tests"] as const;
+const BUILD_SCRIPT_NAMES = ["build"] as const;
 const POSIX_ONLY_FS_COMMAND = /(^|&&\s*|\|\|\s*|;\s*)(rm|cp)\s+/;
 
 test("build npm scripts avoid POSIX-only filesystem commands", () => {
