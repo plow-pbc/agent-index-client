@@ -18,7 +18,8 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noImplicitOverride": true
+    "noImplicitOverride": true,
+    "types": ["node"]
   },
   "include": ["test/**/*.ts"],
   "exclude": ["node_modules", "dist"]
