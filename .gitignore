@@ -5,8 +5,6 @@ node_modules/
 # (.env.bak, .env.old, .env.backup, .env.2 are all just as likely as
 # .env.bak-<date>).
 .env*
-.machine_config_hash
-.reporting-state.json
 .agentsview-update-check
 dist/
 *.tsbuildinfo
