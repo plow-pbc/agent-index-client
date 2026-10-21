@@ -10,9 +10,7 @@
     "prepare": "npm run build"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.6.0",
-    "better-sqlite3": "^11.0.0",
     "typescript": "^6.0.3"
   }
 }

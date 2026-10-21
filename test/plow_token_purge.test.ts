@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -593,7 +593,7 @@ const stateFile = (dir: string) => path.join(dir, ".agent-index.json");
  *  is all these cases need. One schema, because two drift. */
 function createEmptyHermesStore(dir: string) {
   fs.mkdirSync(dir, { recursive: true });
-  const db = new Database(path.join(dir, "state.db"));
+  const db = new DatabaseSync(path.join(dir, "state.db"));
   db.exec("CREATE TABLE session_model_usage (session_id TEXT, model TEXT, input_tokens INT," +
           " output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, first_seen REAL, last_seen REAL)");
   db.close();
