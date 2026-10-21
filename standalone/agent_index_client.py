@@ -22,7 +22,8 @@ counts every coding tool on the device (Claude Code, Codex, ...), so a
 laptop's unrelated work was reported as this agent's usage (card f2bc8633c1).
 
 Sends, per call: --register posts the page content you hand it (agent id,
-name, blurb, repo, runtime, video, images, install-url, logo), all of it public
+name, blurb, repo, runtime, video, images, install-url, logo, what it does,
+Plow tools, latch), all of it public
 because it IS the agent's page, plus one id for this install -- random, made
 up here once and kept, so the Index can tell two installs of one agent apart
 instead of adding them together (on an id somebody else published the page is
@@ -702,19 +703,17 @@ def from_openclaw(days, state=None):
                 continue
             # One LLM call, counted once. A checkpoint fork or a store copied
             # between roots repeats the same event, and `responseId` is what
-            # the canonical collector (reporter/openclaw.ts) keys on to tell
-            # those apart from two calls that merely look alike.
+            # tells those apart from two calls that merely look alike.
             response = message.get("responseId")
             if response is not None:
                 if response in seen:
                     continue
                 seen.add(response)
             # The event's own timestamp when it has one -- `created_at` is when
-            # the row was written -- and the LOCAL calendar date either way, the
-            # rule reporter/openclaw.ts already follows: a UTC date splits one
-            # user-perceived day in two near local midnight, and the same moment
-            # would land on a different dashboard day than this machine's
-            # claude and codex rows.
+            # the row was written -- and the LOCAL calendar date either way: a
+            # UTC date splits one user-perceived day in two near local midnight,
+            # and the same moment would land on a different dashboard day than
+            # this machine's claude and codex rows.
             stamp = _stamp_ms(event.get("timestamp"), created_at)
             date = datetime.datetime.fromtimestamp(stamp / 1000).date().isoformat()
             row = out[date][message.get("model") or "unknown"]
@@ -1038,6 +1037,24 @@ def register(agent, argv):
     images = [argv[i + 1] for i, a in enumerate(argv) if a == "--image"]
     if images:
         body["images"] = images
+    # The page's "What it does" (--does 'Title: detail', exactly four times)
+    # and "Plow tools" (--tool 'Plow Chat: how you use it'). One empty value
+    # clears the list back to the copy the site ships for this agent.
+    for flag, field in (("--does", "capabilities"), ("--tool", "tools")):
+        vals = [argv[i + 1] for i, a in enumerate(argv) if a == flag]
+        if vals == [""]:
+            body[field] = []
+        elif vals:
+            pairs = [[x.strip() for x in v.split(":", 1)] for v in vals]
+            if any(len(p) != 2 or not all(p) for p in pairs):
+                sys.exit(f"  {flag} takes 'Name: text', with the colon")
+            if flag == "--does" and len(pairs) != 4:
+                sys.exit(f"  --does takes exactly four lines, given {len(pairs)}")
+            body[field] = pairs
+    if opt("--latch") is not None:
+        if opt("--latch") not in ("required", "optional", "none", ""):
+            sys.exit("  --latch is required, optional or none ('' returns it to the site's reading)")
+        body["latch"] = opt("--latch")
 
     assertion = index_assertion()
     code, out = _post(f"{API}/v1/agents?agent_id={agent}", body, assertion)
@@ -1150,7 +1167,8 @@ def delete_story(agent, story_id):
 # exists to prevent.
 VALUE_FLAGS = {"--agent", "--days", "--story", "--title", "--body", "--tag",
                "--image", "--name", "--blurb", "--repo", "--runtime",
-               "--video", "--install-url", "--logo", "--delete-story"}
+               "--video", "--install-url", "--logo", "--delete-story",
+               "--does", "--tool", "--latch"}
 BARE_FLAGS = {"--self-check", "--register", "--tags", "--dry-run", "--help", "-h"}
 KNOWN_FLAGS = VALUE_FLAGS | BARE_FLAGS
 

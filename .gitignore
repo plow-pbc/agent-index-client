@@ -3,9 +3,8 @@ node_modules/
 # public, so an untracked .env* in the working tree is one `git add -A` away
 # from publishing a credential. Ignore the whole class rather than one spelling
 # (.env.bak, .env.old, .env.backup, .env.2 are all just as likely as
-# .env.bak-<date>), then re-admit the tracked template.
+# .env.bak-<date>).
 .env*
-!.env.example
 .machine_config_hash
 .reporting-state.json
 .agentsview-update-check

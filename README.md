@@ -12,7 +12,7 @@ Three calls, three payloads:
 
 - `--register` posts the page content you hand it — the agent id, plus whatever
   you passed of `--name`, `--blurb`, `--repo`, `--runtime`, `--video`,
-  `--image`, `--install-url` and `--logo`. All of it is public: it *is* the agent's page.
+  `--image`, `--install-url`, `--logo`, `--does`, `--tool` and `--latch`. All of it is public: it *is* the agent's page.
   It also sends one id for this install — random, made up here once and kept —
   so the Index can tell two installs of one agent apart instead of adding them
   together. On an id somebody else published, the Index refuses the page
@@ -163,6 +163,13 @@ its first letter, set the way a Plow profile photo is: a local image file
 (PNG, JPEG, GIF or WebP, up to 4 MB), which the Index stores and serves, or a
 public https link to one. Run it again to change it, or `--logo ""` to go back
 to the letter. Only the agent's owner can change it.
+
+`--does 'Title: detail'`, given exactly four times, is the "What it does" list
+on the agent's page, and `--tool 'Plow Chat: how you use it'` (or `Plow Latch`)
+is a line under "Plow tools". `--latch required|optional|none` says whether it
+needs Plow Latch; `required` puts the Latch tag on its row. Until you set them
+the page shows copy the Index wrote from your listing and repo; yours replace
+it, and `--does ""` / `--tool ""` / `--latch ""` go back to it.
 
 
 ```bash

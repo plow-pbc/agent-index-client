@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { createEmptyHermesStore } from "./hermes-store";
 
 // The standalone client is the copy that ships inside a container, so this
@@ -55,7 +55,7 @@ function schema23Store(events: object[], agentId = "main"): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "aic-openclaw-zstd-"));
   const dir = path.join(root, "agents", agentId, "agent");
   fs.mkdirSync(dir, { recursive: true });
-  const db = new Database(path.join(dir, "openclaw-agent.sqlite"));
+  const db = new DatabaseSync(path.join(dir, "openclaw-agent.sqlite"));
   db.exec(`
     CREATE TABLE transcript_events (
       session_id TEXT NOT NULL,
@@ -173,7 +173,7 @@ test("a compressed event that will not decompress is a failure, not a smaller to
     usage("z-ai/glm-5.2", { input: 111, output: 222, cacheRead: 0, cacheWrite: 0 }, undefined, "gen-small"),
     bigUsage("z-ai/glm-5.2", { input: 4321, output: 8765, cacheRead: 0, cacheWrite: 0 }, "gen-big"),
   ]);
-  const db = new Database(path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite"));
+  const db = new DatabaseSync(path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite"));
   db.prepare("UPDATE transcript_events SET event_zstd = ? WHERE event_zstd IS NOT NULL")
     .run(Buffer.from("not a zstd frame"));
   db.close();
