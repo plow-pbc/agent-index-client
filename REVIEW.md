@@ -17,6 +17,15 @@ gets it inlined into `.roborev.toml` by `just sync-review-config` in the
 
 **Distribution model:** Internal only; no external customer deployments.
 
+**Ideal customer:** today, single-digit operators running the internal usage
+reporter for their own agents.
+
+**#1 priority: keep code complexity down.** Cut feature creep and
+over-engineering, keep logic DRY, and prefer one obvious path with few
+conditionals. For open-ended interpretation, prefer model judgment over
+brittle regex or keyword rules. Optimize for rapid iteration toward
+product-market fit and code that is easy to delete.
+
 **Architectural commitments:**
 - The product is `standalone/agent_index_client.py`: one Python file, no build step, run unattended by each agent's reporter service. Keep it self-contained and restartable.
 - Fail-fast on config or credential errors — do not silently skip reporting cycles.
