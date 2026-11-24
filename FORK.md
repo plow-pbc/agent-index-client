@@ -24,12 +24,13 @@ shape is sent today: the client reports day x model token counts, because that i
 what the server accepts and what the page draws. Git history holds them if that
 shape is ever wanted again.
 
-**Hermes cannot go through AgentsView.** AgentsView indexes Hermes sessions but
-reports zero tokens for every one, so a Hermes machine reads as idle. The client
-reads `$HERMES_HOME/state.db` directly for those, and merges them with what
-AgentsView reports for claude and codex, which it does invoke. Hermes' four
-token counters are disjoint (`prompt_tokens = input + cache_read + cache_write`)
-and reasoning is a subset of output, so nothing is added twice.
+**No whole-machine scan.** The client reads only the agent's own store: the
+Hermes store at `$HERMES_HOME/state.db`, and one OpenClaw agent's store. It used
+to invoke AgentsView as well and merge its claude and codex totals, but those
+count every coding tool on the device rather than the agent, so AgentsView was
+removed. Hermes' four token counters are disjoint (`prompt_tokens = input +
+cache_read + cache_write`) and reasoning is a subset of output, so nothing is
+added twice.
 
 ## How to run it
 

@@ -199,20 +199,27 @@ across agents.
 
 ## Where it reads usage from
 
-Three sources, summed, because none covers a real machine alone:
+Only the agent's **own** store. Nothing else on the machine is read:
 
-- **agentsview**, the same index the Builder Index client reads. Rich and
-  correct for `claude` and `codex`.
-- **the Hermes store directly**, at `$HERMES_HOME/state.db` (default
-  `~/.hermes/state.db`). agentsview indexes Hermes sessions but reports **zero
-  tokens** for every one, so without this a Hermes agent lands on the index at
-  zero.
-- **the OpenClaw store directly**, at
+- **the Hermes store**, at `$HERMES_HOME/state.db` (default
+  `~/.hermes/state.db`). One Hermes home is one agent's sessions.
+- **the OpenClaw store for one agent**, at
   `$OPENCLAW_STATE_DIR/agents/<id>/agent/openclaw-agent.sqlite` (default
-  `~/.openclaw`). Current OpenClaw keeps transcripts in SQLite rather than the
-  session files agentsview reads, so without this an OpenClaw agent lands on
-  the index at zero. Setting `OPENCLAW_STATE_DIR` to a directory holding no
-  store is a misconfiguration and stops the run.
+  `~/.openclaw`). `<id>` is `OPENCLAW_AGENT_ID` when set, or the only agent
+  under a root you named with `OPENCLAW_STATE_DIR`, which is the case in a Plow
+  container. The default `~/.openclaw` is the host's OpenClaw and is read only
+  with `OPENCLAW_AGENT_ID`. Without it, that store is skipped when a Hermes
+  store is present; when it is the only thing found, the run stops and says to
+  set `OPENCLAW_AGENT_ID`, rather than reporting a silent zero. Several agents with no `OPENCLAW_AGENT_ID` stops
+  the run instead of summing them. Setting
+  `OPENCLAW_STATE_DIR` to a directory holding no store is a misconfiguration
+  and stops the run too.
+
+There is **no whole-machine scan**. The client used to run agentsview, which
+counts every coding tool on the device (Claude Code, Codex, Cursor, ...), so a
+laptop's unrelated work was reported as the agent's usage, and two installs on
+one machine credited both agents with the same total. An agent whose runtime
+has no store of its own here reports nothing until it does.
 
 **Set `HERMES_HOME` explicitly in a container**, and set it correctly: a path
 you name that holds no `state.db` is a **collector failure**. The run stops
@@ -227,10 +234,7 @@ it; a wrong total that looks right costs the number itself.
 
 An **unset** `HERMES_HOME` is different: nobody claimed there is a Hermes store,
 none turned up in the usual places, and an agent that does not run Hermes is the
-ordinary case. That reports quietly from whatever agentsview saw.
-
-The same rule covers agentsview: **installed and broken** stops the run,
-**not installed** does not.
+ordinary case. That reports quietly from whatever OpenClaw store it found.
 
 ## Packaging it into an agent image
 
